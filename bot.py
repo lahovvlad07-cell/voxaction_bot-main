@@ -11,20 +11,19 @@ from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Environment variables validation ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # Укажите свой Vercel URL
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # фронтенд на Vercel
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN must be set")
+if not SUPABASE_URL or not SUPABASE_KEY or not BOT_TOKEN:
+    raise ValueError("Missing required environment variables")
 
-logging.info("✅ Environment variables loaded")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# ---------- Flask app for invoice creation ----------
+# ---------- Flask ----------
 app_flask = Flask(__name__)
 CORS(app_flask)
 
@@ -38,13 +37,13 @@ def create_invoice():
     telegram_id = data.get('user_id')
     amount = data.get('amount')
     if not telegram_id or not amount:
-        return jsonify({"ok": False, "error": "Missing user_id or amount"}), 400
+        return jsonify({"ok": False, "error": "Missing data"}), 400
     try:
         amount = int(amount)
-    except ValueError:
-        return jsonify({"ok": False, "error": "Amount must be a number"}), 400
+    except:
+        return jsonify({"ok": False, "error": "Invalid amount"}), 400
     if amount < 1 or amount > 10000:
-        return jsonify({"ok": False, "error": "Amount must be 1–10000"}), 400
+        return jsonify({"ok": False, "error": "Amount 1–10000"}), 400
 
     try:
         loop = asyncio.new_event_loop()
@@ -52,7 +51,7 @@ def create_invoice():
         invoice_link = loop.run_until_complete(
             bot.create_invoice_link(
                 title="Пополнение баланса",
-                description=f"Пополнение на {amount} ⭐",
+                description=f"{amount} Stars",
                 payload=f"topup_{amount}_{telegram_id}",
                 provider_token="",
                 currency="XTR",
@@ -62,19 +61,13 @@ def create_invoice():
         loop.close()
         return jsonify({"ok": True, "invoice_link": invoice_link})
     except Exception as e:
-        logging.error(f"Error creating invoice: {e}")
+        logging.error(f"Invoice error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 def run_flask():
     app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
 
-# ---------- Supabase client ----------
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ---------- Telegram bot ----------
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
+# ---------- Bot handlers ----------
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
