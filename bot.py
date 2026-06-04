@@ -11,18 +11,20 @@ from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Проверка переменных окружения ----------
+# ---------- Environment variables ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # замените при необходимости
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # ваш адрес на Vercel
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN must be set")
 
-# ---------- Flask ----------
+logging.info("✅ Environment variables loaded")
+
+# ---------- Flask app ----------
 app_flask = Flask(__name__)
 CORS(app_flask)
 
@@ -39,12 +41,13 @@ def create_invoice():
         return jsonify({"ok": False, "error": "Missing user_id or amount"}), 400
     try:
         amount = int(amount)
-    except:
-        return jsonify({"ok": False, "error": "Amount must be integer"}), 400
+    except ValueError:
+        return jsonify({"ok": False, "error": "Amount must be a number"}), 400
     if amount < 1 or amount > 10000:
-        return jsonify({"ok": False, "error": "Amount must be 1-10000"}), 400
+        return jsonify({"ok": False, "error": "Amount must be 1–10000"}), 400
 
     try:
+        # Создаём инвойс
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         invoice_link = loop.run_until_complete(
@@ -60,7 +63,7 @@ def create_invoice():
         loop.close()
         return jsonify({"ok": True, "invoice_link": invoice_link})
     except Exception as e:
-        logging.error(f"Invoice error: {e}")
+        logging.error(f"Error creating invoice: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 def run_flask():
@@ -69,7 +72,7 @@ def run_flask():
 # ---------- Supabase ----------
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Telegram Bot ----------
+# ---------- Telegram bot ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -99,12 +102,17 @@ async def successful_payment(message: types.Message):
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
 async def main():
-    # Запускаем Flask в фоновом потоке
-    Thread(target=run_flask, daemon=True).start()
-    # Удаляем вебхук на всякий случай
+    # Удаляем вебхук, чтобы избежать конфликта с polling
     await bot.delete_webhook(drop_pending_updates=True)
-    # Запускаем polling
-    await dp.start_polling(bot)
+    # Запускаем Flask в фоне
+    Thread(target=run_flask, daemon=True).start()
+    # Запускаем polling с повторными попытками при конфликте
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except Exception as e:
+            logging.error(f"Polling failed: {e}. Restarting in 5 seconds...")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
