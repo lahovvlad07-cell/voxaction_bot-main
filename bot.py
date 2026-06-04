@@ -1,8 +1,8 @@
-import asyncio
 import os
 import logging
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
@@ -11,12 +11,12 @@ from supabase import create_client
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Environment variables validation ----------
+# ---------- Environment variables ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Адрес вашего бота на Render + '/webhook'
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set")
@@ -34,42 +34,55 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------- Flask app for invoice creation and webhook ----------
-app_flask = Flask(__name__)
-CORS(app_flask)  # разрешаем запросы с Vercel
+# ---------- FastAPI app ----------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: set webhook
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(url=WEBHOOK_URL)
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
+    yield
+    # Shutdown: close bot session
+    await bot.session.close()
 
-@app_flask.route('/')
-def health():
-    """Health check endpoint for Render."""
-    return "Bot is running", 200
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app_flask.route('/webhook', methods=['POST'])
-async def telegram_webhook():
-    """Endpoint для получения обновлений от Telegram (webhook)."""
-    update = types.Update.model_validate(await request.get_json())
+# ---------- Endpoints ----------
+@app.get("/")
+async def health():
+    return {"status": "ok"}
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    update = types.Update.model_validate(await request.json())
     await dp.feed_update(bot, update)
-    return "OK", 200
+    return {"ok": True}
 
-@app_flask.route('/create-invoice', methods=['POST'])
-async def create_invoice():
-    """Создаёт инвойс и возвращает ссылку."""
-    data = request.get_json()
+@app.post("/create-invoice")
+async def create_invoice(request: Request):
+    data = await request.json()
     telegram_id = data.get('user_id')
     amount = data.get('amount')
 
     if not telegram_id or not amount:
-        return jsonify({"ok": False, "error": "Missing user_id or amount"}), 400
+        return {"ok": False, "error": "Missing user_id or amount"}, 400
 
     try:
         amount = int(amount)
     except ValueError:
-        return jsonify({"ok": False, "error": "Amount must be a number"}), 400
+        return {"ok": False, "error": "Amount must be a number"}, 400
 
     if amount < 1 or amount > 10000:
-        return jsonify({"ok": False, "error": "Amount must be 1–10000"}), 400
+        return {"ok": False, "error": "Amount must be 1–10000"}, 400
 
     try:
-        # Создаём инвойс (это уже асинхронный метод, вызываем напрямую)
         invoice_link = await bot.create_invoice_link(
             title="Пополнение баланса",
             description=f"Пополнение на {amount} ⭐",
@@ -78,12 +91,12 @@ async def create_invoice():
             currency="XTR",
             prices=[{"label": f"{amount} Stars", "amount": amount * 100}]
         )
-        return jsonify({"ok": True, "invoice_link": invoice_link})
+        return {"ok": True, "invoice_link": invoice_link}
     except Exception as e:
         logging.error(f"Error creating invoice: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return {"ok": False, "error": str(e)}, 500
 
-# ---------- Telegram Bot Handlers ----------
+# ---------- Bot handlers ----------
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -109,27 +122,7 @@ async def successful_payment(message: types.Message):
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
-# ---------- Webhook setup and cleanup ----------
-async def set_webhook():
-    """Устанавливает вебхук при старте."""
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(url=WEBHOOK_URL)
-    logging.info(f"Webhook set to {WEBHOOK_URL}")
-
-async def on_startup():
-    """Выполняется перед запуском веб-сервера."""
-    await set_webhook()
-    # Создаём задачу для бота, но она не нужна, так как обновления будут приходить через /webhook
-
-# ---------- Main entry point ----------
-async def main():
-    # Инициализация вебхука
-    await on_startup()
-    # Запускаем Flask-сервер (без запуска polling бота)
-    import uvicorn
-    config = uvicorn.Config(app_flask, host="0.0.0.0", port=int(os.environ.get('PORT', 8000)), loop="asyncio")
-    server = uvicorn.Server(config)
-    await server.serve()
-
+# ---------- Main ----------
 if __name__ == "__main__":
-    asyncio.run(main())
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
