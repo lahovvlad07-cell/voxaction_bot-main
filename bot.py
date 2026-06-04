@@ -21,7 +21,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN must be set")
 if not WEBHOOK_URL:
-    raise ValueError("❌ WEBHOOK_URL must be set (e.g. https://voxaction-bot-main.onrender.com/webhook)")
+    raise ValueError("❌ WEBHOOK_URL must be set")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
@@ -52,26 +52,30 @@ async def telegram_webhook(request: Request):
 async def create_invoice(request: Request):
     data = await request.json()
     user_id = data.get('user_id')
-    amount = data.get('amount')  # в звёздах
-    if not user_id or not amount:
+    amount_stars = data.get('amount')
+    if not user_id or not amount_stars:
         return {"ok": False, "error": "Missing data"}, 400
     try:
-        amount = int(amount)
+        amount_stars = int(amount_stars)
     except:
         return {"ok": False, "error": "Amount must be integer"}, 400
-    if amount < 1 or amount > 10000:
+    if amount_stars < 1 or amount_stars > 10000:
         return {"ok": False, "error": "Amount must be 1–10000"}, 400
 
-    # Сумма в копейках: amount * 100. Telegram отобразит amount.00 Stars
-    invoice_link = await bot.create_invoice_link(
-        title="Пополнение баланса",
-        description=f"Пополнение на {amount} ⭐",
-        payload=f"topup_{amount}_{user_id}",
-        provider_token="",
-        currency="XTR",
-        prices=[{"label": f"{amount} Stars", "amount": amount * 100}]
-    )
-    return {"ok": True, "invoice_link": invoice_link}
+    try:
+        # Передаём сумму в звёздах (без умножения)
+        invoice_link = await bot.create_invoice_link(
+            title="Пополнение баланса",
+            description=f"Пополнение на {amount_stars} ⭐",
+            payload=f"topup_{amount_stars}_{user_id}",
+            provider_token="",
+            currency="XTR",
+            prices=[{"label": f"{amount_stars} Stars", "amount": amount_stars}]
+        )
+        return {"ok": True, "invoice_link": invoice_link}
+    except Exception as e:
+        logging.error(f"Invoice error: {e}")
+        return {"ok": False, "error": str(e)}, 500
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
@@ -93,7 +97,8 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount // 100  # сумма в звёздах, которую заплатил пользователь
+    # В successful_payment.total_amount теперь будут звёзды (не копейки)
+    amount_stars = message.successful_payment.total_amount
     user_id = message.from_user.id
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
