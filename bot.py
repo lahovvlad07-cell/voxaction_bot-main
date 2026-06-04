@@ -27,6 +27,14 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+async def send_notification(user_id: int, message: str, notify_type: str):
+    result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
+    if result.data and result.data[0].get(notify_type, True):
+        try:
+            await bot.send_message(chat_id=user_id, text=message)
+        except Exception as e:
+            logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -61,9 +69,7 @@ async def create_invoice(request: Request):
         return {"ok": False, "error": "Amount must be integer"}, 400
     if amount_stars < 1 or amount_stars > 10000:
         return {"ok": False, "error": "Amount must be 1–10000"}, 400
-
     try:
-        # Передаём сумму в звёздах (без умножения)
         invoice_link = await bot.create_invoice_link(
             title="Пополнение баланса",
             description=f"Пополнение на {amount_stars} ⭐",
@@ -76,6 +82,18 @@ async def create_invoice(request: Request):
     except Exception as e:
         logging.error(f"Invoice error: {e}")
         return {"ok": False, "error": str(e)}, 500
+
+@app.post("/trade-notification")
+async def trade_notification(request: Request):
+    data = await request.json()
+    buyer_id = data.get('buyer_id')
+    seller_id = data.get('seller_id')
+    amount = data.get('amount')
+    price = data.get('price')
+    total = data.get('total')
+    await send_notification(buyer_id, f"🎉 Вы купили {amount} акций по {price} ⭐ на сумму {total} ⭐. Сделка завершена!", "notify_trades")
+    await send_notification(seller_id, f"💰 Вы продали {amount} акций по {price} ⭐ на сумму {total} ⭐. Средства зачислены!", "notify_trades")
+    return {"ok": True}
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
@@ -97,11 +115,10 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    # В successful_payment.total_amount теперь будут звёзды (не копейки)
     amount_stars = message.successful_payment.total_amount
     user_id = message.from_user.id
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
-    await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
+    await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
 
 if __name__ == "__main__":
     import uvicorn
