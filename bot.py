@@ -8,7 +8,6 @@ from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Environment variables ----------
@@ -25,36 +24,22 @@ if not BOT_TOKEN:
 if not WEBHOOK_URL:
     raise ValueError("❌ WEBHOOK_URL must be set (e.g. https://voxaction-bot-main.onrender.com/webhook)")
 
-logging.info("✅ Environment variables loaded")
-
-# ---------- Supabase client ----------
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ---------- Telegram Bot ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ---------- FastAPI app ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: set webhook
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(url=WEBHOOK_URL)
     logging.info(f"Webhook set to {WEBHOOK_URL}")
     yield
-    # Shutdown: close bot session
     await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ---------- Endpoints ----------
 @app.get("/")
 async def health():
     return {"status": "ok"}
@@ -68,32 +53,30 @@ async def telegram_webhook(request: Request):
 @app.post("/create-invoice")
 async def create_invoice(request: Request):
     data = await request.json()
-    telegram_id = data.get('user_id')
-    amount = data.get('amount')
-
-    if not telegram_id or not amount:
-        return {"ok": False, "error": "Missing user_id or amount"}, 400
-
+    user_id = data.get('user_id')
+    amount = data.get('amount')  # в звёздах, которые платит пользователь
+    if not user_id or not amount:
+        return {"ok": False, "error": "Missing data"}, 400
     try:
         amount = int(amount)
-    except ValueError:
-        return {"ok": False, "error": "Amount must be a number"}, 400
-
+    except:
+        return {"ok": False, "error": "Amount must be integer"}, 400
     if amount < 1 or amount > 10000:
         return {"ok": False, "error": "Amount must be 1–10000"}, 400
 
     try:
+        # Создаём инвойс на сумму amount (в копейках = amount * 100)
         invoice_link = await bot.create_invoice_link(
             title="Пополнение баланса",
             description=f"Пополнение на {amount} ⭐",
-            payload=f"topup_{amount}_{telegram_id}",
+            payload=f"topup_{amount}_{user_id}",
             provider_token="",
             currency="XTR",
             prices=[{"label": f"{amount} Stars", "amount": amount * 100}]
         )
         return {"ok": True, "invoice_link": invoice_link}
     except Exception as e:
-        logging.error(f"Error creating invoice: {e}")
+        logging.error(f"Invoice error: {e}")
         return {"ok": False, "error": str(e)}, 500
 
 # ---------- Bot handlers ----------
@@ -117,12 +100,14 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount // 100
+    amount_stars = message.successful_payment.total_amount // 100  # сколько звёзд заплатил пользователь
     user_id = message.from_user.id
+    # Комиссия уже вычтена Telegram, на счёт бота приходит сумма с вычетом 5%.
+    # Мы зачисляем пользователю ровно amount_stars (т.е. сколько он заплатил)
+    # Если хотите зачислять меньше (например, вычесть комиссию ещё раз), измените логику.
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
-# ---------- Main ----------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
