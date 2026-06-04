@@ -27,6 +27,49 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Функция проверки и выдачи ачивок
+async def check_achievements(user_id: int):
+    # Получаем все ачивки
+    achievements = supabase.table('achievements').select('*').execute()
+    if not achievements.data:
+        return
+    # Получаем уже выданные пользователю
+    user_achievements = supabase.table('user_achievements').select('achievement_id').eq('user_id', user_id).execute()
+    earned_ids = {a['achievement_id'] for a in user_achievements.data}
+    # Получаем статистику пользователя
+    user = supabase.table('users').select('shares, referral_count, total_topup').eq('id', user_id).execute()
+    if not user.data:
+        return
+    user_data = user.data[0]
+    shares_cents = user_data['shares']
+    referrals = user_data.get('referral_count', 0)
+    total_topup_cents = user_data.get('total_topup', 0)
+    # Считаем количество сделок из trades
+    trades_count = supabase.table('trades').select('id', count='exact').or_(f"seller_id.eq.{user_id},buyer_id.eq.{user_id}").execute()
+    trades_count = trades_count.count or 0
+
+    new_achievements = []
+    for ach in achievements.data:
+        if ach['id'] in earned_ids:
+            continue
+        condition_type = ach['condition_type']
+        condition_value = ach['condition_value']
+        earned = False
+        if condition_type == 'trades_count' and trades_count >= condition_value:
+            earned = True
+        elif condition_type == 'shares_held' and shares_cents >= condition_value:
+            earned = True
+        elif condition_type == 'referrals_count' and referrals >= condition_value:
+            earned = True
+        elif condition_type == 'total_topup' and total_topup_cents >= condition_value:
+            earned = True
+        if earned:
+            supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
+            new_achievements.append(ach)
+            # Отправляем уведомление пользователю
+            await send_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
+    return new_achievements
+
 async def send_notification(user_id: int, message: str, notify_type: str):
     result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
     if result.data and result.data[0].get(notify_type, True):
@@ -93,6 +136,9 @@ async def trade_notification(request: Request):
     total = data.get('total')
     await send_notification(buyer_id, f"🎉 Вы купили {amount} акций по {price} ⭐ на сумму {total} ⭐. Сделка завершена!", "notify_trades")
     await send_notification(seller_id, f"💰 Вы продали {amount} акций по {price} ⭐ на сумму {total} ⭐. Средства зачислены!", "notify_trades")
+    # Проверка ачивок для обоих участников
+    await check_achievements(buyer_id)
+    await check_achievements(seller_id)
     return {"ok": True}
 
 @dp.message(CommandStart())
@@ -100,12 +146,9 @@ async def start_cmd(message: types.Message):
     args = message.text.split()
     ref_code = args[1] if len(args) > 1 else None
     if ref_code and ref_code.startswith('REF'):
-        # Проверяем, что реферальный код принадлежит существующему пользователю
         referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
         if referrer.data and referrer.data[0]['id'] != message.from_user.id:
-            # Записываем реферера для нового пользователя
             supabase.table('users').update({'referred_by': referrer.data[0]['id']}).eq('id', message.from_user.id).execute()
-    # Клавиатура с кнопкой Mini App
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть биржу", web_app=WebAppInfo(url=WEB_APP_URL))]
     ])
@@ -117,31 +160,32 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount  # уже в звёздах
+    amount_stars = message.successful_payment.total_amount
     user_id = message.from_user.id
 
-    # Обновляем баланс пользователя
-    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
+    # Обновляем баланс и общую сумму пополнений
+    supabase.table('users').update({
+        'stars_balance': supabase.raw('stars_balance + ?', amount_stars),
+        'total_topup': supabase.raw('total_topup + ?', amount_stars * 100)  # храним в копейках
+    }).eq('id', user_id).execute()
 
-    # Отправляем уведомление о пополнении
     await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
 
-    # ---------- Реферальный бонус ----------
-    # Проверяем, не получал ли уже этот пользователь бонус за приглашение
+    # Реферальный бонус
     user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
     if user_data.data:
         referred_by = user_data.data[0].get('referred_by')
         bonus_claimed = user_data.data[0].get('referral_bonus_claimed', False)
-        # Если есть пригласивший и бонус ещё не начислен, и сумма пополнения >= 10 звёзд
         if referred_by and not bonus_claimed and amount_stars >= 10:
-            # Начисляем пригласившему 5 акций (500 копеек)
             supabase.table('users').update({'shares': supabase.raw('shares + 500')}).eq('id', referred_by).execute()
-            # Увеличиваем счётчик приглашённых
             supabase.table('users').update({'referral_count': supabase.raw('referral_count + 1')}).eq('id', referred_by).execute()
-            # Помечаем, что бонус за этого приглашённого уже начислен
             supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
-            # Отправляем уведомление пригласившему
-            await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций в подарок.", "notify_referral")
+            await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
+            # Проверка ачивок для реферера
+            await check_achievements(referred_by)
+
+    # Проверка ачивок для самого пользователя
+    await check_achievements(user_id)
 
 if __name__ == "__main__":
     import uvicorn
