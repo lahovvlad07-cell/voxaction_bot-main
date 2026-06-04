@@ -11,18 +11,18 @@ from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Environment variables ----------
+# ---------- Проверка переменных окружения ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # ваш фронтенд на Vercel
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # замените при необходимости
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN must be set")
 
-# ---------- Flask app ----------
+# ---------- Flask ----------
 app_flask = Flask(__name__)
 CORS(app_flask)
 
@@ -36,20 +36,21 @@ def create_invoice():
     telegram_id = data.get('user_id')
     amount = data.get('amount')
     if not telegram_id or not amount:
-        return jsonify({"ok": False, "error": "Missing data"}), 400
+        return jsonify({"ok": False, "error": "Missing user_id or amount"}), 400
     try:
         amount = int(amount)
     except:
         return jsonify({"ok": False, "error": "Amount must be integer"}), 400
     if amount < 1 or amount > 10000:
-        return jsonify({"ok": False, "error": "Amount 1–10000"}), 400
+        return jsonify({"ok": False, "error": "Amount must be 1-10000"}), 400
+
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         invoice_link = loop.run_until_complete(
             bot.create_invoice_link(
                 title="Пополнение баланса",
-                description=f"{amount} Telegram Stars",
+                description=f"Пополнение на {amount} ⭐",
                 payload=f"topup_{amount}_{telegram_id}",
                 provider_token="",
                 currency="XTR",
@@ -68,7 +69,7 @@ def run_flask():
 # ---------- Supabase ----------
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Bot ----------
+# ---------- Telegram Bot ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -98,9 +99,11 @@ async def successful_payment(message: types.Message):
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
 async def main():
-    # Запускаем Flask в фоне
+    # Запускаем Flask в фоновом потоке
     Thread(target=run_flask, daemon=True).start()
-    # Запускаем бота в long polling
+    # Удаляем вебхук на всякий случай
+    await bot.delete_webhook(drop_pending_updates=True)
+    # Запускаем polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
