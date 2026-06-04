@@ -36,7 +36,6 @@ async def send_notification(user_id: int, message: str, notify_type: str):
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
 async def check_achievements(user_id: int):
-    """Проверяет и выдаёт достижения пользователю"""
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
         return
@@ -153,14 +152,11 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment(message: types.Message):
     amount_stars = message.successful_payment.total_amount
     user_id = message.from_user.id
-
     supabase.table('users').update({
         'stars_balance': supabase.raw('stars_balance + ?', amount_stars),
         'total_topup': supabase.raw('total_topup + ?', amount_stars * 100)
     }).eq('id', user_id).execute()
-
     await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
-
     user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
     if user_data.data:
         referred_by = user_data.data[0].get('referred_by')
@@ -171,7 +167,6 @@ async def successful_payment(message: types.Message):
             supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
             await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
             await check_achievements(referred_by)
-
     await check_achievements(user_id)
 
 if __name__ == "__main__":
