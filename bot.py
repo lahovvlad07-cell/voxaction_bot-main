@@ -9,14 +9,14 @@ from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Environment variables validation ----------
+# Переменные должны быть добавлены в панели управления Render
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = "https://voxaction-bot.vercel.app"
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app") # <---!!! Укажите ВАШ URL фронтенда на Vercel (без кавычек внутри кавычек)
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
@@ -48,8 +48,7 @@ def create_invoice():
         return jsonify({"ok": False, "error": "Amount must be 1–10000"}), 400
 
     try:
-        # Создаём инвойс синхронно, запуская корутину в текущем event loop (если он есть)
-        # В Flask окружении event loop может отсутствовать – создадим новый
+        # Создаём инвойс
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         invoice_link = loop.run_until_complete(
@@ -80,6 +79,7 @@ dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
+    # Обработка реферального кода и обычный старт
     args = message.text.split()
     if len(args) > 1 and args[1].startswith('REF'):
         ref_code = args[1]
@@ -98,16 +98,13 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount // 100  # копейки -> звёзды
+    amount_stars = message.successful_payment.total_amount // 100
     user_id = message.from_user.id
-    # Обновляем баланс пользователя в Supabase
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
 async def main():
-    # Запускаем Flask в отдельном потоке
     Thread(target=run_flask, daemon=True).start()
-    # Запускаем бота в режиме polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
