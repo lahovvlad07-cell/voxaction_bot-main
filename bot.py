@@ -11,19 +11,18 @@ from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
 
+# ---------- Environment variables ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # фронтенд на Vercel
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # ваш фронтенд на Vercel
 
-if not SUPABASE_URL or not SUPABASE_KEY or not BOT_TOKEN:
-    raise ValueError("Missing required environment variables")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set")
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN must be set")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-# ---------- Flask ----------
+# ---------- Flask app ----------
 app_flask = Flask(__name__)
 CORS(app_flask)
 
@@ -41,17 +40,16 @@ def create_invoice():
     try:
         amount = int(amount)
     except:
-        return jsonify({"ok": False, "error": "Invalid amount"}), 400
+        return jsonify({"ok": False, "error": "Amount must be integer"}), 400
     if amount < 1 or amount > 10000:
         return jsonify({"ok": False, "error": "Amount 1–10000"}), 400
-
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         invoice_link = loop.run_until_complete(
             bot.create_invoice_link(
                 title="Пополнение баланса",
-                description=f"{amount} Stars",
+                description=f"{amount} Telegram Stars",
                 payload=f"topup_{amount}_{telegram_id}",
                 provider_token="",
                 currency="XTR",
@@ -67,7 +65,13 @@ def create_invoice():
 def run_flask():
     app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
 
-# ---------- Bot handlers ----------
+# ---------- Supabase ----------
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ---------- Bot ----------
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -94,7 +98,9 @@ async def successful_payment(message: types.Message):
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
 async def main():
+    # Запускаем Flask в фоне
     Thread(target=run_flask, daemon=True).start()
+    # Запускаем бота в long polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
