@@ -1,13 +1,12 @@
 import asyncio
 import os
 from threading import Thread
-from flask import Flask, request, jsonify
+from flask import Flask
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
-# ---------- Flask для Keep-Alive ----------
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -17,46 +16,48 @@ def health():
 def run_flask():
     app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
 
-# ---------- Supabase ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Telegram Bot ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш адрес
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
-    # Обработка реферального кода, если передан
     args = message.text.split()
-    ref_code = None
     if len(args) > 1:
-        ref_code = args[1]
-        # Проверяем, что код не принадлежит самому пользователю
-        if ref_code.startswith('REF'):
-            referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
-            if referrer.data and referrer.data[0]['id'] != message.from_user.id:
-                # Записываем реферала (можно в отдельную таблицу или в поле referred_by)
-                supabase.table('users').update({'referred_by': referrer.data[0]['id']}).eq('id', message.from_user.id).execute()
-                # Начисляем бонус рефереру (например, 5 Stars)
-                supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + 500')}).eq('id', referrer.data[0]['id']).execute()
+        command = args[1]
+        if command == "topup_10":
+            await topup_10(message)
+            return
+        elif command == "withdraw":
+            await withdraw(message)
+            return
+        else:
+            # Реферальный код
+            ref_code = command
+            if ref_code.startswith('REF'):
+                referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
+                if referrer.data and referrer.data[0]['id'] != message.from_user.id:
+                    supabase.table('users').update({'referred_by': referrer.data[0]['id']}).eq('id', message.from_user.id).execute()
+                    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + 500')}).eq('id', referrer.data[0]['id']).execute()
+                    await message.answer("Вы получили бонус 5 Stars за регистрацию по реферальной ссылке!")
     # Клавиатура с Mini App
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть биржу", web_app=WebAppInfo(url=WEB_APP_URL))]
     ])
     await message.answer("Добро пожаловать в биржу акций!", reply_markup=kb)
 
-@dp.message(Command("topup_10"))
 async def topup_10(message: types.Message):
-    prices = [LabeledPrice(label="Пополнение Stars", amount=1000)]  # 10 Stars (в копейках)
+    prices = [LabeledPrice(label="Пополнение Stars", amount=1000)]
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Пополнение баланса",
-        description="Пополните баланс на 10 Telegram Stars для торговли акциями.",
+        description="Пополните баланс на 10 Telegram Stars.",
         payload="topup_10",
         provider_token="",
         currency="XTR",
@@ -64,9 +65,7 @@ async def topup_10(message: types.Message):
         start_parameter="topup_10"
     )
 
-@dp.message(Command("withdraw"))
 async def withdraw(message: types.Message):
-    # Заглушка – отправляем подарок (Gift) за Stars? Сложно. Пока просто сообщаем.
     await message.answer("Вывод через подарки временно недоступен. Свяжитесь с администратором @ваш_админ")
 
 @dp.pre_checkout_query()
@@ -75,16 +74,13 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount // 100  # копейки -> звёзды
+    amount_stars = message.successful_payment.total_amount // 100
     user_id = message.from_user.id
-    # Добавляем звёзды пользователю в Supabase
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
 async def main():
-    # Запускаем Flask в отдельном потоке
     Thread(target=run_flask, daemon=True).start()
-    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
