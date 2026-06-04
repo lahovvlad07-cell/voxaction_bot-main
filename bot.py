@@ -18,7 +18,7 @@ def run_flask():
 
 # ---------- Telegram бот ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction.vercel.app")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
