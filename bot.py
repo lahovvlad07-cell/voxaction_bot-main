@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш адрес
+WEB_APP_URL = "https://voxaction-bot.vercel.app"
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
