@@ -24,7 +24,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------- Telegram Bot ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш Vercel адрес
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш адрес
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -70,9 +70,14 @@ async def send_invoice(message: types.Message, amount_cents: int, stars: int):
         start_parameter=f"topup_{stars}"
     )
 
-@dp.message(Command("withdraw"))
-async def withdraw(message: types.Message):
-    await message.answer("Вывод через подарки временно недоступен. Скоро появится!")
+# Заглушки для вывода
+@dp.message(Command("withdraw_gifts"))
+async def withdraw_gifts(message: types.Message):
+    await message.answer("Вывод через подарки в разработке. Скоро появится!")
+
+@dp.message(Command("withdraw_ton"))
+async def withdraw_ton(message: types.Message):
+    await message.answer("Вывод в TON в разработке. Скоро появится!")
 
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
