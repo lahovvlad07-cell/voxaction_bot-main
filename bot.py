@@ -4,11 +4,10 @@ import logging
 from threading import Thread
 from flask import Flask
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Flask (Keep-Alive) ----------
@@ -28,19 +27,17 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------- Telegram Bot ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш адрес
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Обработчик команды /start (включая реферальную ссылку и пополнение)
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
-    logging.info(f"Start command received: {args}")
+    logging.info(f"Start command args: {args}")
     if len(args) > 1:
         param = args[1]
-        # Обработка пополнения: start=topup_XXX
         if param.startswith('topup_'):
             amount_str = param.replace('topup_', '')
             try:
@@ -54,7 +51,6 @@ async def start_cmd(message: types.Message):
             except:
                 await message.answer("Неверная сумма.")
                 return
-        # Обработка реферального кода
         elif param.startswith('REF'):
             ref_code = param
             referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
@@ -68,8 +64,7 @@ async def start_cmd(message: types.Message):
     await message.answer("Добро пожаловать в биржу акций!", reply_markup=kb)
 
 async def send_invoice(message: types.Message, stars_amount: int):
-    """Отправляет инвойс на указанное количество Stars."""
-    amount_cents = stars_amount * 100  # Telegram ожидает копейки
+    amount_cents = stars_amount * 100
     prices = [LabeledPrice(label=f"{stars_amount} Stars", amount=amount_cents)]
     await bot.send_invoice(
         chat_id=message.chat.id,
@@ -88,9 +83,8 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount // 100  # копейки -> звёзды
+    amount_stars = message.successful_payment.total_amount // 100
     user_id = message.from_user.id
-    # Обновляем баланс пользователя в Supabase
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
