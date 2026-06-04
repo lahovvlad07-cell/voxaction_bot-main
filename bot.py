@@ -12,11 +12,10 @@ from supabase import create_client
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Environment variables validation ----------
-# Переменные должны быть добавлены в панели управления Render
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app") # <---!!! Укажите ВАШ URL фронтенда на Vercel (без кавычек внутри кавычек)
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")  # Укажите свой Vercel URL
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
@@ -27,7 +26,7 @@ logging.info("✅ Environment variables loaded")
 
 # ---------- Flask app for invoice creation ----------
 app_flask = Flask(__name__)
-CORS(app_flask)  # разрешаем запросы с Vercel
+CORS(app_flask)
 
 @app_flask.route('/')
 def health():
@@ -48,7 +47,6 @@ def create_invoice():
         return jsonify({"ok": False, "error": "Amount must be 1–10000"}), 400
 
     try:
-        # Создаём инвойс
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         invoice_link = loop.run_until_complete(
@@ -79,7 +77,6 @@ dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
-    # Обработка реферального кода и обычный старт
     args = message.text.split()
     if len(args) > 1 and args[1].startswith('REF'):
         ref_code = args[1]
