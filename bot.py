@@ -16,9 +16,9 @@ def run_flask():
     app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")
+# Жёстко прописываем правильный адрес
+WEB_APP_URL = "https://voxaction-bot.vercel.app"
 
-# Для отладки – выведем в лог, какой URL используется
 print(f"✅ Бот использует WEB_APP_URL = {WEB_APP_URL}")
 
 bot = Bot(token=BOT_TOKEN)
