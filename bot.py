@@ -98,12 +98,14 @@ async def trade_notification(request: Request):
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
-    if len(args) > 1 and args[1].startswith('REF'):
-        ref_code = args[1]
+    ref_code = args[1] if len(args) > 1 else None
+    if ref_code and ref_code.startswith('REF'):
+        # Проверяем, что реферальный код принадлежит существующему пользователю
         referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
         if referrer.data and referrer.data[0]['id'] != message.from_user.id:
+            # Записываем реферера для нового пользователя
             supabase.table('users').update({'referred_by': referrer.data[0]['id']}).eq('id', message.from_user.id).execute()
-            supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + 500')}).eq('id', referrer.data[0]['id']).execute()
+    # Клавиатура с кнопкой Mini App
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть биржу", web_app=WebAppInfo(url=WEB_APP_URL))]
     ])
@@ -115,10 +117,31 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount
+    amount_stars = message.successful_payment.total_amount  # уже в звёздах
     user_id = message.from_user.id
+
+    # Обновляем баланс пользователя
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
+
+    # Отправляем уведомление о пополнении
     await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
+
+    # ---------- Реферальный бонус ----------
+    # Проверяем, не получал ли уже этот пользователь бонус за приглашение
+    user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
+    if user_data.data:
+        referred_by = user_data.data[0].get('referred_by')
+        bonus_claimed = user_data.data[0].get('referral_bonus_claimed', False)
+        # Если есть пригласивший и бонус ещё не начислен, и сумма пополнения >= 10 звёзд
+        if referred_by and not bonus_claimed and amount_stars >= 10:
+            # Начисляем пригласившему 5 акций (500 копеек)
+            supabase.table('users').update({'shares': supabase.raw('shares + 500')}).eq('id', referred_by).execute()
+            # Увеличиваем счётчик приглашённых
+            supabase.table('users').update({'referral_count': supabase.raw('referral_count + 1')}).eq('id', referred_by).execute()
+            # Помечаем, что бонус за этого приглашённого уже начислен
+            supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
+            # Отправляем уведомление пригласившему
+            await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций в подарок.", "notify_referral")
 
 if __name__ == "__main__":
     import uvicorn
