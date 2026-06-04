@@ -1,107 +1,106 @@
 import asyncio
 import os
-import json
-from threading import Thread
-from flask import Flask, request, jsonify
+import uuid
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
-from supabase import create_client, Client
+from aiogram.client.default import DefaultBotProperties
+from supabase import create_client
 
-# ---------- Конфигурация ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.onrender.com")  # адрес вашего Mini App
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://gsutnhhklidxmewdkcvk.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzdXRuaGhrbGlkeG1ld2RrY3ZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA1NzA2MTEsImV4cCI6MjA5NjE0NjYxMX0.XEtyJVT0BfmEgAAsGagPHRdHhmCgrtWEbtzov0c3EXc")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.onrender.com")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Инициализация бота
-bot = Bot(token=BOT_TOKEN)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Инициализация Supabase
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ---------- Flask сервер для уведомлений (опционально) ----------
-flask_app = Flask(__name__)
-
-@flask_app.route('/webhook', methods=['POST'])
-def webhook():
-    # Сюда можно принимать уведомления от Supabase или от вашего фронтенда
-    data = request.json
-    # Пример: {"user_id": 123, "message": "Ваша сделка выполнена"}
-    user_id = data.get('user_id')
-    text = data.get('message')
-    if user_id and text:
-        asyncio.run_coroutine_threadsafe(bot.send_message(user_id, text), asyncio.get_event_loop())
-    return jsonify({"ok": True})
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)), debug=False)
-
-# ---------- Команды бота ----------
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Открыть биржу", web_app=WebAppInfo(url=WEB_APP_URL))]
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.full_name
+    referrer_id = None
+    if message.text and len(message.text.split()) > 1:
+        try:
+            referrer_id = int(message.text.split()[1])
+        except:
+            pass
+    # Проверяем, существует ли пользователь
+    res = supabase.table('users').select('id').eq('id', user_id).execute()
+    if not res.data:
+        supabase.table('users').insert({
+            'id': user_id,
+            'username': username,
+            'shares': 0,
+            'stars_balance': 0,
+            'referrer_id': referrer_id,
+            'referral_code': str(uuid.uuid4())[:8]
+        }).execute()
+    # Генерируем реферальную ссылку
+    ref_code = supabase.table('users').select('referral_code').eq('id', user_id).execute().data[0]['referral_code']
+    ref_link = f"https://t.me/{bot.username}?start={ref_code}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Открыть биржу", web_app=WebAppInfo(url=WEB_APP_URL))],
+        [InlineKeyboardButton(text="🔗 Реферальная ссылка", callback_data="ref_link")]
     ])
-    await message.answer("Добро пожаловать в биржу акций! Используйте кнопку ниже, чтобы начать торговлю.", reply_markup=kb)
+    await message.answer(
+        f"Добро пожаловать, {username}!\n\nТоргуйте акциями, зарабатывайте Stars и приглашайте друзей.\n\nВаша реферальная ссылка: <code>{ref_link}</code>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
 
+@dp.callback_query(lambda c: c.data == "ref_link")
+async def send_ref_link(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    ref_code = supabase.table('users').select('referral_code').eq('id', user_id).execute().data[0]['referral_code']
+    ref_link = f"https://t.me/{bot.username}?start={ref_code}"
+    await callback.message.answer(f"Ваша реферальная ссылка:\n<code>{ref_link}</code>", parse_mode="HTML")
+    await callback.answer()
+
+# Команда /topup (вызывается из Mini App через отправку сообщения)
 @dp.message(Command("topup"))
 async def topup_cmd(message: types.Message):
-    # Создаём инвойс на 10 Stars (1000 копеек). Можно сделать выбор суммы.
-    prices = [LabeledPrice(label="Пополнение баланса", amount=1000)]  # 1000 копеек = 10 Stars
+    args = message.text.split()
+    amount = 10
+    if len(args) > 1:
+        try:
+            amount = int(args[1])
+            if amount < 1 or amount > 1000:
+                amount = 10
+        except:
+            amount = 10
+    prices = [LabeledPrice(label="Пополнение Stars", amount=amount * 100)]  # в копейках
     await bot.send_invoice(
         chat_id=message.chat.id,
-        title="Пополнение Stars",
-        description="Пополните баланс Stars для участия в торгах.",
-        payload="topup",
-        provider_token="",  # Для Telegram Stars оставляем пустым
+        title="Пополнение баланса Stars",
+        description=f"Пополнение на {amount} ⭐ для торговли акциями.",
+        payload=f"topup_{amount}_{message.from_user.id}",
+        provider_token="",
         currency="XTR",
         prices=prices,
         start_parameter="topup"
     )
 
 @dp.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    # Всегда подтверждаем
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-@dp.message(SuccessfulPayment())
-async def process_successful_payment(message: types.Message):
+@dp.message(SuccessfulPayment)
+async def successful_payment(message: types.Message):
     payload = message.successful_payment.invoice_payload
-    amount_stars = message.successful_payment.total_amount // 100  # переводим из копеек в Stars
+    amount_stars = message.successful_payment.total_amount // 100
     user_id = message.from_user.id
-    # Обновляем баланс пользователя в Supabase
-    try:
-        # Получаем текущий баланс
-        user_data = supabase.table('users').select('stars_balance').eq('id', user_id).execute()
-        if user_data.data:
-            current_balance = user_data.data[0]['stars_balance']
-            new_balance = current_balance + amount_stars * 100  # добавляем в копейках
-            supabase.table('users').update({'stars_balance': new_balance}).eq('id', user_id).execute()
-        else:
-            # Создаём пользователя, если его нет (на всякий случай)
-            supabase.table('users').insert({'id': user_id, 'username': message.from_user.username or "user", 'shares': 0, 'stars_balance': amount_stars * 100}).execute()
-        await message.answer(f"✅ Баланс успешно пополнен на {amount_stars} ⭐")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка пополнения: {e}")
-        print(e)
+    # Добавляем звёзды пользователю
+    supabase.rpc('add_stars', {'p_user_id': user_id, 'p_amount_stars': amount_stars}).execute()
+    await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐. Теперь вы можете торговать!")
 
-# ---------- Функция для отправки уведомлений (вызывается из триггера или из кода) ----------
-async def send_notification(user_id: int, text: str):
-    # Проверяем настройки уведомлений пользователя
-    try:
-        user = supabase.table('users').select('notifications_enabled').eq('id', user_id).execute()
-        if user.data and user.data[0].get('notifications_enabled', True):
-            await bot.send_message(user_id, text)
-    except Exception as e:
-        print(f"Ошибка отправки уведомления: {e}")
+# Команда для вывода через подарки (пока заглушка)
+@dp.message(Command("withdraw"))
+async def withdraw_cmd(message: types.Message):
+    await message.answer("Вывод средств через подарки (Gifts) будет доступен в ближайшее время. Вы сможете обменять Stars на подарки и продать их на внутреннем рынке.")
 
-# ---------- Запуск бота и Flask ----------
 async def main():
-    # Запускаем Flask в отдельном потоке (для вебхуков, если нужно)
-    Thread(target=run_flask, daemon=True).start()
-    # Запускаем polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
