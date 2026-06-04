@@ -9,9 +9,23 @@ from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
+# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Flask ----------
+# ---------- Environment variables validation ----------
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш адрес
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN must be set")
+
+logging.info("✅ Environment variables loaded")
+
+# ---------- Flask app for invoice creation ----------
 app_flask = Flask(__name__)
 CORS(app_flask)  # разрешаем запросы с Vercel
 
@@ -26,11 +40,16 @@ def create_invoice():
     amount = data.get('amount')
     if not telegram_id or not amount:
         return jsonify({"ok": False, "error": "Missing user_id or amount"}), 400
-    amount = int(amount)
+    try:
+        amount = int(amount)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Amount must be a number"}), 400
     if amount < 1 or amount > 10000:
         return jsonify({"ok": False, "error": "Amount must be 1–10000"}), 400
+
     try:
-        # Создаём инвойс синхронно
+        # Создаём инвойс синхронно, запуская корутину в текущем event loop (если он есть)
+        # В Flask окружении event loop может отсутствовать – создадим новый
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         invoice_link = loop.run_until_complete(
@@ -52,15 +71,10 @@ def create_invoice():
 def run_flask():
     app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
 
-# ---------- Supabase ----------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# ---------- Supabase client ----------
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Telegram Bot ----------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-frontend.vercel.app")  # замените на ваш Vercel адрес
-
+# ---------- Telegram bot ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -84,14 +98,16 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(SuccessfulPayment)
 async def successful_payment(message: types.Message):
-    amount_stars = message.successful_payment.total_amount // 100
+    amount_stars = message.successful_payment.total_amount // 100  # копейки -> звёзды
     user_id = message.from_user.id
-    # Обновляем баланс в Supabase
+    # Обновляем баланс пользователя в Supabase
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', amount_stars)}).eq('id', user_id).execute()
     await message.answer(f"✅ Баланс пополнен на {amount_stars} ⭐")
 
 async def main():
+    # Запускаем Flask в отдельном потоке
     Thread(target=run_flask, daemon=True).start()
+    # Запускаем бота в режиме polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
