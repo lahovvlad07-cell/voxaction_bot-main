@@ -27,7 +27,19 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-async def send_notification(user_id: int, message: str, notify_type: str):
+# ---------- Новая функция уведомлений (в БД + Telegram) ----------
+async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
+    """Сохраняет уведомление в БД и отправляет Telegram-сообщение, если разрешено."""
+    try:
+        supabase.table('notifications').insert({
+            'user_id': user_id,
+            'message': message,
+            'type': notify_type,
+            'is_read': False
+        }).execute()
+    except Exception as e:
+        logging.warning(f"Не удалось сохранить уведомление в БД: {e}")
+    # Отправляем в Telegram, если пользователь включил уведомления
     result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
     if result.data and result.data[0].get(notify_type, True):
         try:
@@ -35,6 +47,11 @@ async def send_notification(user_id: int, message: str, notify_type: str):
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
+# Заменяем старую функцию send_notification
+async def send_notification(user_id: int, message: str, notify_type: str):
+    await save_notification(user_id, message, notify_type)
+
+# ---------- Достижения ----------
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -65,10 +82,19 @@ async def check_achievements(user_id: int):
             earned = True
         elif condition_type == 'total_topup' and total_topup_cents >= condition_value:
             earned = True
+        elif condition_type == 'all_achievements':
+            # Проверим, что все остальные достижения (кроме этого) получены
+            all_other = [a for a in achievements.data if a['id'] != ach['id'] and a['condition_type'] != 'all_achievements']
+            all_earned = all(
+                supabase.table('user_achievements').select('id').eq('user_id', user_id).eq('achievement_id', o['id']).execute().data
+                for o in all_other
+            )
+            earned = all_earned
         if earned:
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
-            await send_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
+            await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
+# ---------- FastAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -125,8 +151,8 @@ async def trade_notification(request: Request):
     amount = data.get('amount')
     price = data.get('price')
     total = data.get('total')
-    await send_notification(buyer_id, f"🎉 Вы купили {amount} акций по {price} ⭐ на сумму {total} ⭐. Сделка завершена!", "notify_trades")
-    await send_notification(seller_id, f"💰 Вы продали {amount} акций по {price} ⭐ на сумму {total} ⭐. Средства зачислены!", "notify_trades")
+    await save_notification(buyer_id, f"🎉 Вы купили {amount} акций по {price} ⭐ на сумму {total} ⭐. Сделка завершена!", "notify_trades")
+    await save_notification(seller_id, f"💰 Вы продали {amount} акций по {price} ⭐ на сумму {total} ⭐. Средства зачислены!", "notify_trades")
     await check_achievements(buyer_id)
     await check_achievements(seller_id)
     return {"ok": True}
@@ -196,6 +222,7 @@ async def admin_cancel_order(request: Request):
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
+# ---------- Telegram bot handlers ----------
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -221,7 +248,7 @@ async def successful_payment(message: types.Message):
         'stars_balance': supabase.raw('stars_balance + ?', amount_stars),
         'total_topup': supabase.raw('total_topup + ?', amount_stars * 100)
     }).eq('id', user_id).execute()
-    await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
+    await save_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
     user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
     if user_data.data:
         referred_by = user_data.data[0].get('referred_by')
@@ -230,11 +257,10 @@ async def successful_payment(message: types.Message):
             supabase.table('users').update({'shares': supabase.raw('shares + 500')}).eq('id', referred_by).execute()
             supabase.table('users').update({'referral_count': supabase.raw('referral_count + 1')}).eq('id', referred_by).execute()
             supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
-            await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
+            await save_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
             await check_achievements(referred_by)
     await check_achievements(user_id)
 
-# ---------- ВЫВОД ЧЕРЕЗ ПОДАРКИ (GIFTS) ----------
 @dp.message(Command("withdraw_gifts"))
 async def withdraw_gifts(message: types.Message):
     user_id = message.from_user.id
@@ -268,7 +294,6 @@ async def process_withdraw(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Недостаточно средств для вывода.")
         await callback.answer()
         return
-    # Списание звёзд (имитация – реальная отправка подарка потребует API, которого пока нет)
     new_balance = user.data[0]['stars_balance'] - amount
     supabase.table('users').update({'stars_balance': new_balance}).eq('id', user_id).execute()
     await callback.message.edit_text(
