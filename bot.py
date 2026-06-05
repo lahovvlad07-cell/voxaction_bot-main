@@ -27,9 +27,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------- Новая функция уведомлений (в БД + Telegram) ----------
 async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
-    """Сохраняет уведомление в БД и отправляет Telegram-сообщение, если разрешено."""
+    """Сохраняет уведомление в БД и отправляет Telegram, если пользователь включил уведомления."""
     try:
         supabase.table('notifications').insert({
             'user_id': user_id,
@@ -39,7 +38,6 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         }).execute()
     except Exception as e:
         logging.warning(f"Не удалось сохранить уведомление в БД: {e}")
-    # Отправляем в Telegram, если пользователь включил уведомления
     result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
     if result.data and result.data[0].get(notify_type, True):
         try:
@@ -47,11 +45,9 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
-# Заменяем старую функцию send_notification
 async def send_notification(user_id: int, message: str, notify_type: str):
     await save_notification(user_id, message, notify_type)
 
-# ---------- Достижения ----------
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -83,7 +79,6 @@ async def check_achievements(user_id: int):
         elif condition_type == 'total_topup' and total_topup_cents >= condition_value:
             earned = True
         elif condition_type == 'all_achievements':
-            # Проверим, что все остальные достижения (кроме этого) получены
             all_other = [a for a in achievements.data if a['id'] != ach['id'] and a['condition_type'] != 'all_achievements']
             all_earned = all(
                 supabase.table('user_achievements').select('id').eq('user_id', user_id).eq('achievement_id', o['id']).execute().data
@@ -94,7 +89,7 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ---------- FastAPI ----------
+# ----- FastAPI -----
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -190,6 +185,8 @@ async def admin_add_shares(request: Request):
         return {"ok": False, "error": "Missing target_id or shares"}, 400
     shares_cents = shares * 100
     supabase.table('users').update({'shares': supabase.raw('shares + ?', shares_cents)}).eq('id', target_id).execute()
+    # После выдачи акций проверяем достижения
+    await check_achievements(target_id)
     return {"ok": True}
 
 @app.post("/admin/add-stars")
@@ -203,6 +200,9 @@ async def admin_add_stars(request: Request):
     if not target_id or stars is None:
         return {"ok": False, "error": "Missing target_id or stars"}, 400
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', stars)}).eq('id', target_id).execute()
+    # После выдачи звёзд проверяем достижения (например, пополнение)
+    # Но total_topup не меняется здесь, поэтому не обязательно. Для единообразия вызовем.
+    await check_achievements(target_id)
     return {"ok": True}
 
 @app.post("/admin/cancel-order")
@@ -222,7 +222,7 @@ async def admin_cancel_order(request: Request):
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
-# ---------- Telegram bot handlers ----------
+# ----- Telegram handlers -----
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
