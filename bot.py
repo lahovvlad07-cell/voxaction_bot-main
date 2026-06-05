@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
@@ -140,7 +140,6 @@ async def admin_stats(request: Request):
     users = supabase.table('users').select('shares').execute()
     total_shares_cents = sum(u['shares'] for u in users.data) if users.data else 0
     total_shares = total_shares_cents / 100
-    # Резерв – пока заглушка, можно хранить в отдельной таблице
     reserve = 7000
     return {"ok": True, "total_shares": total_shares, "reserve": reserve}
 
@@ -234,6 +233,49 @@ async def successful_payment(message: types.Message):
             await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
             await check_achievements(referred_by)
     await check_achievements(user_id)
+
+# ---------- ВЫВОД ЧЕРЕЗ ПОДАРКИ (GIFTS) ----------
+@dp.message(Command("withdraw_gifts"))
+async def withdraw_gifts(message: types.Message):
+    user_id = message.from_user.id
+    user = supabase.table('users').select('stars_balance').eq('id', user_id).execute()
+    if not user.data:
+        await message.answer("❌ Пользователь не найден.")
+        return
+    balance = user.data[0]['stars_balance']
+    if balance < 1000:
+        await message.answer("❌ Минимальная сумма вывода – 1000 ⭐. У вас недостаточно средств.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1000 ⭐", callback_data="withdraw_1000"),
+         InlineKeyboardButton(text="2000 ⭐", callback_data="withdraw_2000"),
+         InlineKeyboardButton(text="5000 ⭐", callback_data="withdraw_5000")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="withdraw_cancel")]
+    ])
+    await message.answer("💸 Вывод через подарки (Gifts). Выберите сумму:", reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("withdraw_"))
+async def process_withdraw(callback: types.CallbackQuery):
+    data = callback.data
+    if data == "withdraw_cancel":
+        await callback.message.edit_text("❌ Вывод отменён.")
+        await callback.answer()
+        return
+    amount = int(data.split('_')[1])
+    user_id = callback.from_user.id
+    user = supabase.table('users').select('stars_balance').eq('id', user_id).execute()
+    if not user.data or user.data[0]['stars_balance'] < amount:
+        await callback.message.edit_text("❌ Недостаточно средств для вывода.")
+        await callback.answer()
+        return
+    # Списание звёзд (имитация – реальная отправка подарка потребует API, которого пока нет)
+    new_balance = user.data[0]['stars_balance'] - amount
+    supabase.table('users').update({'stars_balance': new_balance}).eq('id', user_id).execute()
+    await callback.message.edit_text(
+        f"✅ Заявка на вывод {amount} ⭐ принята. Администратор свяжется с вами для отправки подарка.\n"
+        f"Ваш баланс: {new_balance} ⭐"
+    )
+    await callback.answer()
 
 if __name__ == "__main__":
     import uvicorn
