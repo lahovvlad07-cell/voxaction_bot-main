@@ -27,8 +27,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ---------- Уведомления ----------
 async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
-    """Сохраняет уведомление в БД и отправляет Telegram, если пользователь включил уведомления."""
     try:
         supabase.table('notifications').insert({
             'user_id': user_id,
@@ -48,6 +48,7 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
 async def send_notification(user_id: int, message: str, notify_type: str):
     await save_notification(user_id, message, notify_type)
 
+# ---------- Достижения ----------
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -89,7 +90,201 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ----- FastAPI -----
+# ---------- Мэтчинг ордеров (FIFO + приоритет цены) ----------
+async def match_buy_order(buy_order_id: int, buyer_id: int, price_cents: int, amount_cents: int):
+    """
+    Покупатель хочет купить amount_cents акций по цене не выше price_cents.
+    Ищем активные ордера на продажу с ценой <= price_cents, сортируем по цене (возрастание),
+    затем по created_at (FIFO). Частично исполняем.
+    Возвращает {'remaining': остаток, 'executed': сколько куплено, 'total_cost': итоговая стоимость}.
+    """
+    sell_orders = supabase.table('orders')\
+        .select('*')\
+        .eq('status', 'active')\
+        .eq('type', 'sell')\
+        .lte('price_per_share', price_cents)\
+        .order('price_per_share', ascending=True)\
+        .order('created_at', ascending=True)\
+        .execute()
+    sell_orders = sell_orders.data or []
+    remaining = amount_cents
+    total_cost = 0
+    executed = 0
+    for sell in sell_orders:
+        if remaining <= 0:
+            break
+        buy_amount = min(remaining, sell['amount'])
+        cost = buy_amount * sell['price_per_share']
+        # Записываем сделку
+        supabase.table('trades').insert({
+            'seller_id': sell['seller_id'],
+            'buyer_id': buyer_id,
+            'amount': buy_amount,
+            'price_per_share': sell['price_per_share'],
+            'total_stars': cost
+        }).execute()
+        # Обновляем балансы
+        supabase.table('users').update({'shares': supabase.raw('shares + ?', buy_amount)}).eq('id', buyer_id).execute()
+        supabase.table('users').update({'stars_balance': supabase.raw('stars_balance - ?', cost)}).eq('id', buyer_id).execute()
+        supabase.table('users').update({'shares': supabase.raw('shares - ?', buy_amount)}).eq('id', sell['seller_id']).execute()
+        supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', cost)}).eq('id', sell['seller_id']).execute()
+        # Обновляем ордер продавца
+        new_amount = sell['amount'] - buy_amount
+        if new_amount <= 0:
+            supabase.table('orders').update({'status': 'filled'}).eq('id', sell['id']).execute()
+        else:
+            supabase.table('orders').update({'amount': new_amount}).eq('id', sell['id']).execute()
+        # Уведомления
+        await save_notification(buyer_id, f"✅ Куплено {buy_amount/100:.2f} акций по {sell['price_per_share']/100:.2f} ⭐", "notify_trades")
+        await save_notification(sell['seller_id'], f"💰 Продано {buy_amount/100:.2f} акций по {sell['price_per_share']/100:.2f} ⭐", "notify_trades")
+        # Достижения
+        await check_achievements(buyer_id)
+        await check_achievements(sell['seller_id'])
+        executed += buy_amount
+        total_cost += cost
+        remaining -= buy_amount
+    return {'remaining': remaining, 'executed': executed, 'total_cost': total_cost}
+
+async def match_sell_order(sell_order_id: int, seller_id: int, price_cents: int, amount_cents: int):
+    """
+    Продавец хочет продать amount_cents акций по цене не ниже price_cents.
+    Ищем активные ордера на покупку с ценой >= price_cents, сортируем по цене (убывание),
+    затем по created_at (FIFO). Частично исполняем.
+    """
+    buy_orders = supabase.table('orders')\
+        .select('*')\
+        .eq('status', 'active')\
+        .eq('type', 'buy')\
+        .gte('price_per_share', price_cents)\
+        .order('price_per_share', ascending=False)\
+        .order('created_at', ascending=True)\
+        .execute()
+    buy_orders = buy_orders.data or []
+    remaining = amount_cents
+    total_revenue = 0
+    executed = 0
+    for buy in buy_orders:
+        if remaining <= 0:
+            break
+        sell_amount = min(remaining, buy['amount'])
+        revenue = sell_amount * buy['price_per_share']
+        # Записываем сделку
+        supabase.table('trades').insert({
+            'seller_id': seller_id,
+            'buyer_id': buy['buyer_id'],
+            'amount': sell_amount,
+            'price_per_share': buy['price_per_share'],
+            'total_stars': revenue
+        }).execute()
+        # Обновляем балансы
+        supabase.table('users').update({'shares': supabase.raw('shares - ?', sell_amount)}).eq('id', seller_id).execute()
+        supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', revenue)}).eq('id', seller_id).execute()
+        supabase.table('users').update({'shares': supabase.raw('shares + ?', sell_amount)}).eq('id', buy['buyer_id']).execute()
+        supabase.table('users').update({'stars_balance': supabase.raw('stars_balance - ?', revenue)}).eq('id', buy['buyer_id']).execute()
+        # Обновляем ордер покупателя
+        new_amount = buy['amount'] - sell_amount
+        if new_amount <= 0:
+            supabase.table('orders').update({'status': 'filled'}).eq('id', buy['id']).execute()
+        else:
+            supabase.table('orders').update({'amount': new_amount}).eq('id', buy['id']).execute()
+        # Уведомления
+        await save_notification(seller_id, f"💰 Продано {sell_amount/100:.2f} акций по {buy['price_per_share']/100:.2f} ⭐", "notify_trades")
+        await save_notification(buy['buyer_id'], f"✅ Куплено {sell_amount/100:.2f} акций по {buy['price_per_share']/100:.2f} ⭐", "notify_trades")
+        await check_achievements(seller_id)
+        await check_achievements(buy['buyer_id'])
+        executed += sell_amount
+        total_revenue += revenue
+        remaining -= sell_amount
+    return {'remaining': remaining, 'executed': executed, 'total_revenue': total_revenue}
+
+# ---------- Создание ордеров с матчингом ----------
+async def create_sell_order(user_id: int, amount_cents: int, price_cents: int):
+    # Проверка наличия акций
+    user = supabase.table('users').select('shares').eq('id', user_id).execute()
+    if not user.data or user.data[0]['shares'] < amount_cents:
+        return {'success': False, 'error': 'Недостаточно акций'}
+    # Сначала пытаемся сопоставить с ордерами на покупку
+    match_result = await match_sell_order(None, user_id, price_cents, amount_cents)
+    remaining = match_result['remaining']
+    if remaining > 0:
+        # Блокируем остаток акций и создаём ордер на продажу
+        supabase.table('users').update({'shares': supabase.raw('shares - ?', remaining)}).eq('id', user_id).execute()
+        supabase.table('orders').insert({
+            'seller_id': user_id,
+            'amount': remaining,
+            'price_per_share': price_cents,
+            'status': 'active',
+            'type': 'sell'
+        }).execute()
+    return {'success': True, 'executed': match_result['executed'], 'remaining': remaining}
+
+async def create_buy_order(user_id: int, amount_cents: int, price_cents: int):
+    # Проверка наличия звёзд
+    user = supabase.table('users').select('stars_balance').eq('id', user_id).execute()
+    if not user.data or user.data[0]['stars_balance'] < amount_cents * price_cents:
+        return {'success': False, 'error': 'Недостаточно Stars'}
+    # Резервируем звёзды (пока полную сумму)
+    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance - ?', amount_cents * price_cents)}).eq('id', user_id).execute()
+    # Матчим с ордерами на продажу
+    match_result = await match_buy_order(None, user_id, price_cents, amount_cents)
+    remaining = match_result['remaining']
+    if remaining > 0:
+        # Сохраняем остаток как ордер на покупку (звёзды уже зарезервированы)
+        supabase.table('orders').insert({
+            'buyer_id': user_id,
+            'amount': remaining,
+            'price_per_share': price_cents,
+            'status': 'active',
+            'type': 'buy'
+        }).execute()
+    else:
+        # Если всё исполнилось, возвращаем неизрасходованные звёзды (но их быть не должно)
+        pass
+    return {'success': True, 'executed': match_result['executed'], 'remaining': remaining}
+
+# ---------- Отмена ордеров ----------
+async def cancel_order(user_id: int, order_id: int):
+    order = supabase.table('orders').select('*').eq('id', order_id).eq('status', 'active').maybeSingle().execute()
+    if not order.data:
+        return {'success': False, 'error': 'Order not found or not active'}
+    order = order.data
+    if order['type'] == 'sell' and order['seller_id'] != user_id:
+        return {'success': False, 'error': 'Not your order'}
+    if order['type'] == 'buy' and order['buyer_id'] != user_id:
+        return {'success': False, 'error': 'Not your order'}
+    if order['type'] == 'sell':
+        supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', user_id).execute()
+    else:
+        frozen_stars = order['amount'] * order['price_per_share']
+        supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', frozen_stars)}).eq('id', user_id).execute()
+    supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
+    return {'success': True}
+
+async def cancel_all_orders(user_id: int):
+    orders = supabase.table('orders').select('*').eq('status', 'active')\
+        .or_(f"seller_id.eq.{user_id},buyer_id.eq.{user_id}").execute()
+    orders = orders.data or []
+    for order in orders:
+        if order['type'] == 'sell' and order['seller_id'] == user_id:
+            supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', user_id).execute()
+        elif order['type'] == 'buy' and order['buyer_id'] == user_id:
+            frozen_stars = order['amount'] * order['price_per_share']
+            supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', frozen_stars)}).eq('id', user_id).execute()
+        supabase.table('orders').update({'status': 'cancelled'}).eq('id', order['id']).execute()
+    return len(orders)
+
+# ---------- Получение стакана ----------
+async def get_orderbook():
+    sell_orders = supabase.table('orders').select('*').eq('status', 'active').eq('type', 'sell')\
+        .order('price_per_share', ascending=True).order('created_at', ascending=True).execute()
+    buy_orders = supabase.table('orders').select('*').eq('status', 'active').eq('type', 'buy')\
+        .order('price_per_share', ascending=False).order('created_at', ascending=True).execute()
+    return {
+        'sell': sell_orders.data or [],
+        'buy': buy_orders.data or []
+    }
+
+# ---------- FastAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -152,6 +347,61 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
+# ---------- Эндпоинты для ордеров ----------
+@app.post("/create-sell-order")
+async def api_create_sell_order(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    amount = data.get('amount')
+    price = data.get('price')
+    if not user_id or amount is None or price is None:
+        return {"ok": False, "error": "Missing data"}, 400
+    amount_cents = int(round(float(amount) * 100))
+    price_cents = int(round(float(price) * 100))
+    result = await create_sell_order(user_id, amount_cents, price_cents)
+    return {"ok": result['success'], "error": result.get('error'), "executed": result.get('executed', 0), "remaining": result.get('remaining', 0)}
+
+@app.post("/create-buy-order")
+async def api_create_buy_order(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    amount = data.get('amount')
+    price = data.get('price')
+    if not user_id or amount is None or price is None:
+        return {"ok": False, "error": "Missing data"}, 400
+    amount_cents = int(round(float(amount) * 100))
+    price_cents = int(round(float(price) * 100))
+    result = await create_buy_order(user_id, amount_cents, price_cents)
+    return {"ok": result['success'], "error": result.get('error'), "executed": result.get('executed', 0), "remaining": result.get('remaining', 0)}
+
+@app.post("/cancel-order")
+async def api_cancel_order(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    order_id = data.get('order_id')
+    if not user_id or not order_id:
+        return {"ok": False, "error": "Missing data"}, 400
+    result = await cancel_order(user_id, order_id)
+    return {"ok": result['success'], "error": result.get('error')}
+
+@app.post("/cancel-all-orders")
+async def api_cancel_all_orders(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    if not user_id:
+        return {"ok": False, "error": "Missing user_id"}, 400
+    count = await cancel_all_orders(user_id)
+    return {"ok": True, "cancelled": count}
+
+@app.post("/get-orderbook")
+async def api_get_orderbook(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    # user_id не используется, но можно передать для фильтрации своих ордеров на фронте
+    book = await get_orderbook()
+    return {"ok": True, "sell": book['sell'], "buy": book['buy']}
+
+# ---------- Админские эндпоинты (без изменений) ----------
 @app.post("/admin/stats")
 async def admin_stats(request: Request):
     data = await request.json()
@@ -185,7 +435,6 @@ async def admin_add_shares(request: Request):
         return {"ok": False, "error": "Missing target_id or shares"}, 400
     shares_cents = shares * 100
     supabase.table('users').update({'shares': supabase.raw('shares + ?', shares_cents)}).eq('id', target_id).execute()
-    # После выдачи акций проверяем достижения
     await check_achievements(target_id)
     return {"ok": True}
 
@@ -200,8 +449,6 @@ async def admin_add_stars(request: Request):
     if not target_id or stars is None:
         return {"ok": False, "error": "Missing target_id or stars"}, 400
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', stars)}).eq('id', target_id).execute()
-    # После выдачи звёзд проверяем достижения (например, пополнение)
-    # Но total_topup не меняется здесь, поэтому не обязательно. Для единообразия вызовем.
     await check_achievements(target_id)
     return {"ok": True}
 
@@ -212,17 +459,19 @@ async def admin_cancel_order(request: Request):
     order_id = data.get('order_id')
     if admin_id != 6048486427:
         return {"ok": False, "error": "Access denied"}, 403
-    order = supabase.table('orders').select('seller_id, amount, status').eq('id', order_id).execute()
+    order = supabase.table('orders').select('*').eq('id', order_id).eq('status', 'active').maybeSingle().execute()
     if not order.data:
         return {"ok": False, "error": "Order not found"}, 404
-    order = order.data[0]
-    if order['status'] != 'active':
-        return {"ok": False, "error": "Order already completed or cancelled"}, 400
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', order['seller_id']).execute()
+    order = order.data
+    if order['type'] == 'sell':
+        supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', order['seller_id']).execute()
+    else:
+        frozen_stars = order['amount'] * order['price_per_share']
+        supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', frozen_stars)}).eq('id', order['buyer_id']).execute()
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
-# ----- Telegram handlers -----
+# ---------- Telegram бот (без изменений) ----------
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
