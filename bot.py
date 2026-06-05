@@ -27,8 +27,9 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------- Уведомления (для будущего, если понадобится) ----------
+# ----- Уведомления в БД + Telegram -----
 async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
+    """Сохраняет уведомление в БД и отправляет Telegram, если пользователь включил уведомления."""
     try:
         supabase.table('notifications').insert({
             'user_id': user_id,
@@ -38,7 +39,7 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         }).execute()
     except Exception as e:
         logging.warning(f"Не удалось сохранить уведомление в БД: {e}")
-    # Отправляем в Telegram (если пользователь включил)
+    # Отправляем в Telegram
     result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
     if result.data and result.data[0].get(notify_type, True):
         try:
@@ -46,10 +47,11 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
+# Заменяем старую функцию
 async def send_notification(user_id: int, message: str, notify_type: str):
     await save_notification(user_id, message, notify_type)
 
-# ---------- Достижения (без изменений) ----------
+# ----- Достижения -----
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -80,74 +82,19 @@ async def check_achievements(user_id: int):
             earned = True
         elif condition_type == 'total_topup' and total_topup_cents >= condition_value:
             earned = True
+        elif condition_type == 'all_achievements':
+            # Проверяем, что все остальные достижения (кроме этого) получены
+            all_other = [a for a in achievements.data if a['id'] != ach['id'] and a['condition_type'] != 'all_achievements']
+            all_earned = all(
+                supabase.table('user_achievements').select('id').eq('user_id', user_id).eq('achievement_id', o['id']).execute().data
+                for o in all_other
+            )
+            earned = all_earned
         if earned:
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
-            await send_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
+            await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ---------- Функции биржи (без изменений) ----------
-async def create_sell_order(user_id: int, amount_cents: int, price_cents: int):
-    user = supabase.table('users').select('shares').eq('id', user_id).execute()
-    if not user.data or user.data[0]['shares'] < amount_cents:
-        return {'success': False, 'error': 'Недостаточно акций'}
-    supabase.table('users').update({'shares': supabase.raw('shares - ?', amount_cents)}).eq('id', user_id).execute()
-    supabase.table('orders').insert({
-        'seller_id': user_id,
-        'amount': amount_cents,
-        'price_per_share': price_cents,
-        'status': 'active'
-    }).execute()
-    return {'success': True}
-
-async def execute_trade_partial(order_id: int, buyer_id: int, buy_amount_cents: int):
-    order = supabase.table('orders').select('*').eq('id', order_id).eq('status', 'active').maybeSingle().execute()
-    if not order.data:
-        return {'success': False, 'error': 'Order not found or not active'}
-    order = order.data
-    if order['amount'] < buy_amount_cents:
-        return {'success': False, 'error': 'Not enough shares'}
-    cost = buy_amount_cents * order['price_per_share']
-    buyer = supabase.table('users').select('stars_balance').eq('id', buyer_id).execute()
-    if not buyer.data or buyer.data[0]['stars_balance'] < cost:
-        return {'success': False, 'error': 'Not enough stars'}
-    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance - ?', cost)}).eq('id', buyer_id).execute()
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', buy_amount_cents)}).eq('id', buyer_id).execute()
-    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', cost)}).eq('id', order['seller_id']).execute()
-    supabase.table('trades').insert({
-        'seller_id': order['seller_id'],
-        'buyer_id': buyer_id,
-        'amount': buy_amount_cents,
-        'price_per_share': order['price_per_share'],
-        'total_stars': cost
-    }).execute()
-    new_amount = order['amount'] - buy_amount_cents
-    if new_amount <= 0:
-        supabase.table('orders').update({'status': 'filled'}).eq('id', order_id).execute()
-    else:
-        supabase.table('orders').update({'amount': new_amount}).eq('id', order_id).execute()
-    await send_notification(buyer_id, f"✅ Куплено {buy_amount_cents/100:.2f} акций по {order['price_per_share']/100:.2f} ⭐", "notify_trades")
-    await send_notification(order['seller_id'], f"💰 Продано {buy_amount_cents/100:.2f} акций по {order['price_per_share']/100:.2f} ⭐", "notify_trades")
-    await check_achievements(buyer_id)
-    await check_achievements(order['seller_id'])
-    return {'success': True}
-
-async def cancel_order(user_id: int, order_id: int):
-    order = supabase.table('orders').select('*').eq('id', order_id).eq('status', 'active').maybeSingle().execute()
-    if not order.data or order.data['seller_id'] != user_id:
-        return {'success': False, 'error': 'Not your order or not active'}
-    order = order.data
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', user_id).execute()
-    supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
-    return {'success': True}
-
-async def cancel_all_user_orders(user_id: int):
-    orders = supabase.table('orders').select('*').eq('seller_id', user_id).eq('status', 'active').execute()
-    orders = orders.data or []
-    for order in orders:
-        supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', user_id).execute()
-        supabase.table('orders').update({'status': 'cancelled'}).eq('id', order['id']).execute()
-    return len(orders)
-
-# ---------- FastAPI ----------
+# ----- FastAPI -----
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -204,71 +151,12 @@ async def trade_notification(request: Request):
     amount = data.get('amount')
     price = data.get('price')
     total = data.get('total')
-    await send_notification(buyer_id, f"🎉 Вы купили {amount} акций по {price} ⭐ на сумму {total} ⭐. Сделка завершена!", "notify_trades")
-    await send_notification(seller_id, f"💰 Вы продали {amount} акций по {price} ⭐ на сумму {total} ⭐. Средства зачислены!", "notify_trades")
+    await save_notification(buyer_id, f"🎉 Вы купили {amount} акций по {price} ⭐ на сумму {total} ⭐. Сделка завершена!", "notify_trades")
+    await save_notification(seller_id, f"💰 Вы продали {amount} акций по {price} ⭐ на сумму {total} ⭐. Средства зачислены!", "notify_trades")
     await check_achievements(buyer_id)
     await check_achievements(seller_id)
     return {"ok": True}
 
-# ---------- Эндпоинты для акций ----------
-@app.post("/get-active-orders")
-async def get_active_orders(request: Request):
-    data = await request.json()
-    orders = supabase.table('orders').select('*').eq('status', 'active').order('price_per_share', ascending=True).execute()
-    return {"ok": True, "orders": orders.data or []}
-
-@app.post("/get-user-orders")
-async def get_user_orders(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    orders = supabase.table('orders').select('*').eq('seller_id', user_id).eq('status', 'active').execute()
-    return {"ok": True, "orders": orders.data or []}
-
-@app.post("/create-sell-order")
-async def api_create_sell_order(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    amount = data.get('amount')
-    price = data.get('price')
-    if not user_id or amount is None or price is None:
-        return {"ok": False, "error": "Missing data"}, 400
-    amount_cents = int(round(float(amount) * 100))
-    price_cents = int(round(float(price) * 100))
-    result = await create_sell_order(user_id, amount_cents, price_cents)
-    return {"ok": result['success'], "error": result.get('error')}
-
-@app.post("/execute-trade")
-async def api_execute_trade(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    order_id = data.get('order_id')
-    amount = data.get('amount')
-    if not user_id or not order_id or amount is None:
-        return {"ok": False, "error": "Missing data"}, 400
-    amount_cents = int(round(float(amount) * 100))
-    result = await execute_trade_partial(order_id, user_id, amount_cents)
-    return {"ok": result['success'], "error": result.get('error')}
-
-@app.post("/cancel-order")
-async def api_cancel_order(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    order_id = data.get('order_id')
-    if not user_id or not order_id:
-        return {"ok": False, "error": "Missing data"}, 400
-    result = await cancel_order(user_id, order_id)
-    return {"ok": result['success'], "error": result.get('error')}
-
-@app.post("/cancel-all-orders")
-async def api_cancel_all_orders(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    if not user_id:
-        return {"ok": False, "error": "Missing user_id"}, 400
-    count = await cancel_all_user_orders(user_id)
-    return {"ok": True, "cancelled": count}
-
-# ---------- Админские эндпоинты (с вызовом check_achievements) ----------
 @app.post("/admin/stats")
 async def admin_stats(request: Request):
     data = await request.json()
@@ -302,7 +190,6 @@ async def admin_add_shares(request: Request):
         return {"ok": False, "error": "Missing target_id or shares"}, 400
     shares_cents = shares * 100
     supabase.table('users').update({'shares': supabase.raw('shares + ?', shares_cents)}).eq('id', target_id).execute()
-    await check_achievements(target_id)
     return {"ok": True}
 
 @app.post("/admin/add-stars")
@@ -316,7 +203,6 @@ async def admin_add_stars(request: Request):
     if not target_id or stars is None:
         return {"ok": False, "error": "Missing target_id or stars"}, 400
     supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', stars)}).eq('id', target_id).execute()
-    await check_achievements(target_id)
     return {"ok": True}
 
 @app.post("/admin/cancel-order")
@@ -336,19 +222,7 @@ async def admin_cancel_order(request: Request):
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
-# ---------- Дополнительный эндпоинт для уведомлений (на будущее) ----------
-@app.post("/send-notification")
-async def send_notification_from_frontend(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    message = data.get('message')
-    notify_type = data.get('type', 'info')
-    if not user_id or not message:
-        return {"ok": False, "error": "Missing data"}, 400
-    await send_notification(user_id, message, notify_type)
-    return {"ok": True}
-
-# ---------- Telegram бот ----------
+# ----- Telegram handlers -----
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -374,7 +248,7 @@ async def successful_payment(message: types.Message):
         'stars_balance': supabase.raw('stars_balance + ?', amount_stars),
         'total_topup': supabase.raw('total_topup + ?', amount_stars * 100)
     }).eq('id', user_id).execute()
-    await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
+    await save_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
     user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
     if user_data.data:
         referred_by = user_data.data[0].get('referred_by')
@@ -383,7 +257,7 @@ async def successful_payment(message: types.Message):
             supabase.table('users').update({'shares': supabase.raw('shares + 500')}).eq('id', referred_by).execute()
             supabase.table('users').update({'referral_count': supabase.raw('referral_count + 1')}).eq('id', referred_by).execute()
             supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
-            await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
+            await save_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
             await check_achievements(referred_by)
     await check_achievements(user_id)
 
