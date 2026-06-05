@@ -45,9 +45,6 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
-async def send_notification(user_id: int, message: str, notify_type: str):
-    await save_notification(user_id, message, notify_type)
-
 # ---------- Достижения ----------
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
@@ -90,7 +87,7 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ---------- Мэтчинг ордеров (FIFO + приоритет цены) ----------
+# ---------- Мэтчинг ордеров ----------
 async def match_buy_order(buy_order_id: int, buyer_id: int, price_cents: int, amount_cents: int):
     sell_orders = supabase.table('orders')\
         .select('*')\
@@ -313,7 +310,6 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
-# ---------- Эндпоинты для ордеров ----------
 @app.post("/create-sell-order")
 async def api_create_sell_order(request: Request):
     data = await request.json()
@@ -364,7 +360,6 @@ async def api_get_orderbook(request: Request):
     book = await get_orderbook()
     return {"ok": True, "sell": book['sell'], "buy": book['buy']}
 
-# ---------- Админские эндпоинты ----------
 @app.post("/admin/stats")
 async def admin_stats(request: Request):
     data = await request.json()
@@ -434,7 +429,7 @@ async def admin_cancel_order(request: Request):
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
-# ---------- Telegram бот ----------
+# ---------- Telegram bot handlers ----------
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
