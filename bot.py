@@ -80,7 +80,7 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ---------- Функции биржи (простая версия: только продажа, частичная покупка) ----------
+# ---------- Функции биржи (ваша старая логика) ----------
 async def create_sell_order(user_id: int, amount_cents: int, price_cents: int):
     user = supabase.table('users').select('shares').eq('id', user_id).execute()
     if not user.data or user.data[0]['shares'] < amount_cents:
@@ -120,7 +120,6 @@ async def execute_trade_partial(order_id: int, buyer_id: int, buy_amount_cents: 
         supabase.table('orders').update({'status': 'filled'}).eq('id', order_id).execute()
     else:
         supabase.table('orders').update({'amount': new_amount}).eq('id', order_id).execute()
-    # Уведомления
     await save_notification(buyer_id, f"✅ Куплено {buy_amount_cents/100:.2f} акций по {order['price_per_share']/100:.2f} ⭐", "notify_trades")
     await save_notification(order['seller_id'], f"💰 Продано {buy_amount_cents/100:.2f} акций по {order['price_per_share']/100:.2f} ⭐", "notify_trades")
     await check_achievements(buyer_id)
@@ -207,7 +206,7 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
-# ---------- Эндпоинты для акций ----------
+# ---------- Эндпоинты для акций (ваша старая логика) ----------
 @app.post("/get-active-orders")
 async def get_active_orders(request: Request):
     data = await request.json()
