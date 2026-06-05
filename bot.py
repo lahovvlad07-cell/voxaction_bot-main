@@ -80,7 +80,7 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ---------- Функции биржи (только продажа, частичная покупка) ----------
+# ---------- Функции биржи (простая версия: только продажа, частичная покупка) ----------
 async def create_sell_order(user_id: int, amount_cents: int, price_cents: int):
     user = supabase.table('users').select('shares').eq('id', user_id).execute()
     if not user.data or user.data[0]['shares'] < amount_cents:
@@ -90,8 +90,7 @@ async def create_sell_order(user_id: int, amount_cents: int, price_cents: int):
         'seller_id': user_id,
         'amount': amount_cents,
         'price_per_share': price_cents,
-        'status': 'active',
-        'type': 'sell'
+        'status': 'active'
     }).execute()
     return {'success': True}
 
@@ -208,7 +207,65 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
-# Админские эндпоинты
+# ---------- Эндпоинты для акций ----------
+@app.post("/get-active-orders")
+async def get_active_orders(request: Request):
+    data = await request.json()
+    orders = supabase.table('orders').select('*').eq('status', 'active').order('price_per_share', ascending=True).execute()
+    return {"ok": True, "orders": orders.data or []}
+
+@app.post("/get-user-orders")
+async def get_user_orders(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    orders = supabase.table('orders').select('*').eq('seller_id', user_id).eq('status', 'active').execute()
+    return {"ok": True, "orders": orders.data or []}
+
+@app.post("/create-sell-order")
+async def api_create_sell_order(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    amount = data.get('amount')
+    price = data.get('price')
+    if not user_id or amount is None or price is None:
+        return {"ok": False, "error": "Missing data"}, 400
+    amount_cents = int(round(float(amount) * 100))
+    price_cents = int(round(float(price) * 100))
+    result = await create_sell_order(user_id, amount_cents, price_cents)
+    return {"ok": result['success'], "error": result.get('error')}
+
+@app.post("/execute-trade")
+async def api_execute_trade(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    order_id = data.get('order_id')
+    amount = data.get('amount')
+    if not user_id or not order_id or amount is None:
+        return {"ok": False, "error": "Missing data"}, 400
+    amount_cents = int(round(float(amount) * 100))
+    result = await execute_trade_partial(order_id, user_id, amount_cents)
+    return {"ok": result['success'], "error": result.get('error')}
+
+@app.post("/cancel-order")
+async def api_cancel_order(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    order_id = data.get('order_id')
+    if not user_id or not order_id:
+        return {"ok": False, "error": "Missing data"}, 400
+    result = await cancel_order(user_id, order_id)
+    return {"ok": result['success'], "error": result.get('error')}
+
+@app.post("/cancel-all-orders")
+async def api_cancel_all_orders(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    if not user_id:
+        return {"ok": False, "error": "Missing user_id"}, 400
+    count = await cancel_all_user_orders(user_id)
+    return {"ok": True, "cancelled": count}
+
+# ---------- Админские эндпоинты (с вызовом check_achievements) ----------
 @app.post("/admin/stats")
 async def admin_stats(request: Request):
     data = await request.json()
@@ -275,65 +332,6 @@ async def admin_cancel_order(request: Request):
     supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', order['seller_id']).execute()
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
-
-# Эндпоинты для фронтенда (создание, отмена, список ордеров)
-@app.post("/create-sell-order")
-async def api_create_sell_order(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    amount = data.get('amount')
-    price = data.get('price')
-    if not user_id or amount is None or price is None:
-        return {"ok": False, "error": "Missing data"}, 400
-    amount_cents = int(round(float(amount) * 100))
-    price_cents = int(round(float(price) * 100))
-    result = await create_sell_order(user_id, amount_cents, price_cents)
-    return {"ok": result['success'], "error": result.get('error')}
-
-@app.post("/execute-trade")
-async def api_execute_trade(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    order_id = data.get('order_id')
-    amount = data.get('amount')
-    if not user_id or not order_id or amount is None:
-        return {"ok": False, "error": "Missing data"}, 400
-    amount_cents = int(round(float(amount) * 100))
-    result = await execute_trade_partial(order_id, user_id, amount_cents)
-    return {"ok": result['success'], "error": result.get('error')}
-
-@app.post("/cancel-order")
-async def api_cancel_order(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    order_id = data.get('order_id')
-    if not user_id or not order_id:
-        return {"ok": False, "error": "Missing data"}, 400
-    result = await cancel_order(user_id, order_id)
-    return {"ok": result['success'], "error": result.get('error')}
-
-@app.post("/cancel-all-orders")
-async def api_cancel_all_orders(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    if not user_id:
-        return {"ok": False, "error": "Missing user_id"}, 400
-    count = await cancel_all_user_orders(user_id)
-    return {"ok": True, "cancelled": count}
-
-@app.post("/get-active-orders")
-async def get_active_orders(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    orders = supabase.table('orders').select('*').eq('status', 'active').order('price_per_share', ascending=True).execute()
-    return {"ok": True, "orders": orders.data or []}
-
-@app.post("/get-user-orders")
-async def get_user_orders(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    orders = supabase.table('orders').select('*').eq('seller_id', user_id).eq('status', 'active').execute()
-    return {"ok": True, "orders": orders.data or []}
 
 # ---------- Telegram бот ----------
 @dp.message(CommandStart())
