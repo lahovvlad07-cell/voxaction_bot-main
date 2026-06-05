@@ -27,8 +27,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-ADMIN_ID = 6048486427  # Ваш Telegram ID
-
 async def send_notification(user_id: int, message: str, notify_type: str):
     result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
     if result.data and result.data[0].get(notify_type, True):
@@ -133,6 +131,72 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
+@app.post("/admin/stats")
+async def admin_stats(request: Request):
+    data = await request.json()
+    admin_id = data.get('admin_id')
+    if admin_id != 6048486427:
+        return {"ok": False, "error": "Access denied"}, 403
+    users = supabase.table('users').select('shares').execute()
+    total_shares_cents = sum(u['shares'] for u in users.data) if users.data else 0
+    total_shares = total_shares_cents / 100
+    # Резерв – пока заглушка, можно хранить в отдельной таблице
+    reserve = 7000
+    return {"ok": True, "total_shares": total_shares, "reserve": reserve}
+
+@app.post("/admin/users")
+async def admin_users(request: Request):
+    data = await request.json()
+    admin_id = data.get('admin_id')
+    if admin_id != 6048486427:
+        return {"ok": False, "error": "Access denied"}, 403
+    users = supabase.table('users').select('id, username, shares, stars_balance').execute()
+    return {"ok": True, "users": users.data}
+
+@app.post("/admin/add-shares")
+async def admin_add_shares(request: Request):
+    data = await request.json()
+    admin_id = data.get('admin_id')
+    target_id = data.get('target_id')
+    shares = data.get('shares')
+    if admin_id != 6048486427:
+        return {"ok": False, "error": "Access denied"}, 403
+    if not target_id or shares is None:
+        return {"ok": False, "error": "Missing target_id or shares"}, 400
+    shares_cents = shares * 100
+    supabase.table('users').update({'shares': supabase.raw('shares + ?', shares_cents)}).eq('id', target_id).execute()
+    return {"ok": True}
+
+@app.post("/admin/add-stars")
+async def admin_add_stars(request: Request):
+    data = await request.json()
+    admin_id = data.get('admin_id')
+    target_id = data.get('target_id')
+    stars = data.get('stars')
+    if admin_id != 6048486427:
+        return {"ok": False, "error": "Access denied"}, 403
+    if not target_id or stars is None:
+        return {"ok": False, "error": "Missing target_id or stars"}, 400
+    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', stars)}).eq('id', target_id).execute()
+    return {"ok": True}
+
+@app.post("/admin/cancel-order")
+async def admin_cancel_order(request: Request):
+    data = await request.json()
+    admin_id = data.get('admin_id')
+    order_id = data.get('order_id')
+    if admin_id != 6048486427:
+        return {"ok": False, "error": "Access denied"}, 403
+    order = supabase.table('orders').select('seller_id, amount, status').eq('id', order_id).execute()
+    if not order.data:
+        return {"ok": False, "error": "Order not found"}, 404
+    order = order.data[0]
+    if order['status'] != 'active':
+        return {"ok": False, "error": "Order already completed or cancelled"}, 400
+    supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', order['seller_id']).execute()
+    supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
+    return {"ok": True}
+
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -154,14 +218,11 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment(message: types.Message):
     amount_stars = message.successful_payment.total_amount
     user_id = message.from_user.id
-
     supabase.table('users').update({
         'stars_balance': supabase.raw('stars_balance + ?', amount_stars),
         'total_topup': supabase.raw('total_topup + ?', amount_stars * 100)
     }).eq('id', user_id).execute()
-
     await send_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
-
     user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
     if user_data.data:
         referred_by = user_data.data[0].get('referred_by')
@@ -172,68 +233,7 @@ async def successful_payment(message: types.Message):
             supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
             await send_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
             await check_achievements(referred_by)
-
     await check_achievements(user_id)
-
-# ---------- Admin endpoints ----------
-@app.post("/admin/add-shares")
-async def admin_add_shares(request: Request):
-    data = await request.json()
-    admin_id = data.get('admin_id')
-    target_id = data.get('target_id')
-    shares = data.get('shares')  # количество акций в звёздах (целое)
-    if admin_id != ADMIN_ID:
-        return {"ok": False, "error": "Access denied"}, 403
-    shares_cents = shares * 100
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', shares_cents)}).eq('id', target_id).execute()
-    return {"ok": True}
-
-@app.post("/admin/add-stars")
-async def admin_add_stars(request: Request):
-    data = await request.json()
-    admin_id = data.get('admin_id')
-    target_id = data.get('target_id')
-    stars = data.get('stars')
-    if admin_id != ADMIN_ID:
-        return {"ok": False, "error": "Access denied"}, 403
-    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', stars)}).eq('id', target_id).execute()
-    return {"ok": True}
-
-@app.post("/admin/cancel-order")
-async def admin_cancel_order(request: Request):
-    data = await request.json()
-    admin_id = data.get('admin_id')
-    order_id = data.get('order_id')
-    if admin_id != ADMIN_ID:
-        return {"ok": False, "error": "Access denied"}, 403
-    # Получаем ордер и возвращаем акции продавцу
-    order = supabase.table('orders').select('seller_id, amount').eq('id', order_id).eq('status', 'active').execute()
-    if not order.data:
-        return {"ok": False, "error": "Order not found or not active"}, 400
-    seller_id = order.data[0]['seller_id']
-    amount_cents = order.data[0]['amount']
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', amount_cents)}).eq('id', seller_id).execute()
-    supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
-    return {"ok": True}
-
-@app.get("/admin/stats")
-async def admin_stats(admin_id: int):
-    if admin_id != ADMIN_ID:
-        return {"ok": False, "error": "Access denied"}, 403
-    # Общее количество акций в обращении
-    users = supabase.table('users').select('shares').execute()
-    total_shares_cents = sum(u['shares'] for u in users.data) if users.data else 0
-    total_shares = total_shares_cents // 100
-    # Резерв (7k акций) – у нас нет отдельной таблицы, просто константа
-    reserve = 7000
-    return {"total_shares": total_shares, "reserve": reserve}
-
-@app.get("/admin/users")
-async def admin_users(admin_id: int):
-    if admin_id != ADMIN_ID:
-        return {"ok": False, "error": "Access denied"}, 403
-    users = supabase.table('users').select('id, username, shares, stars_balance').execute()
-    return {"users": users.data}
 
 if __name__ == "__main__":
     import uvicorn
