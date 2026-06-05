@@ -27,7 +27,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------- Уведомления (Telegram + БД) ----------
 async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
     try:
         supabase.table('notifications').insert({
@@ -45,7 +44,6 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
-# ---------- Достижения ----------
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -80,7 +78,7 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ---------- Функции биржи (простая версия: только продажа, частичная покупка) ----------
+# ---------- Функции биржи ----------
 async def create_sell_order(user_id: int, amount_cents: int, price_cents: int):
     user = supabase.table('users').select('shares').eq('id', user_id).execute()
     if not user.data or user.data[0]['shares'] < amount_cents:
@@ -120,7 +118,6 @@ async def execute_trade_partial(order_id: int, buyer_id: int, buy_amount_cents: 
         supabase.table('orders').update({'status': 'filled'}).eq('id', order_id).execute()
     else:
         supabase.table('orders').update({'amount': new_amount}).eq('id', order_id).execute()
-    # Уведомления
     await save_notification(buyer_id, f"✅ Куплено {buy_amount_cents/100:.2f} акций по {order['price_per_share']/100:.2f} ⭐", "notify_trades")
     await save_notification(order['seller_id'], f"💰 Продано {buy_amount_cents/100:.2f} акций по {order['price_per_share']/100:.2f} ⭐", "notify_trades")
     await check_achievements(buyer_id)
@@ -207,7 +204,6 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
-# ---------- Эндпоинты для акций ----------
 @app.post("/get-active-orders")
 async def get_active_orders(request: Request):
     data = await request.json()
@@ -265,7 +261,6 @@ async def api_cancel_all_orders(request: Request):
     count = await cancel_all_user_orders(user_id)
     return {"ok": True, "cancelled": count}
 
-# ---------- Эндпоинт для уведомлений из фронтенда ----------
 @app.post("/send-notification")
 async def send_notification_from_frontend(request: Request):
     data = await request.json()
@@ -277,7 +272,6 @@ async def send_notification_from_frontend(request: Request):
     await save_notification(user_id, message, notify_type)
     return {"ok": True}
 
-# ---------- Админские эндпоинты (с вызовом check_achievements) ----------
 @app.post("/admin/stats")
 async def admin_stats(request: Request):
     data = await request.json()
