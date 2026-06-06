@@ -10,11 +10,12 @@ from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
 
+# === Конфигурация из переменных окружения ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction-bot.vercel.app")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://voxaction.duckdns.org")   # ваш новый HTTPS адрес
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://voxaction.duckdns.org/webhook")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ SUPABASE_URL and SUPABASE_KEY must be set")
@@ -27,9 +28,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ----- Уведомления в БД + Telegram -----
+# === Уведомления в БД + Telegram ===
 async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
-    """Сохраняет уведомление в БД и отправляет Telegram, если пользователь включил уведомления."""
     try:
         supabase.table('notifications').insert({
             'user_id': user_id,
@@ -39,7 +39,7 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         }).execute()
     except Exception as e:
         logging.warning(f"Не удалось сохранить уведомление в БД: {e}")
-    # Отправляем в Telegram
+    # Отправляем в Telegram, если пользователь включил уведомления
     result = supabase.table('users').select(notify_type).eq('id', user_id).execute()
     if result.data and result.data[0].get(notify_type, True):
         try:
@@ -47,11 +47,10 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
-# Заменяем старую функцию
 async def send_notification(user_id: int, message: str, notify_type: str):
     await save_notification(user_id, message, notify_type)
 
-# ----- Достижения -----
+# === Достижения ===
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -83,7 +82,6 @@ async def check_achievements(user_id: int):
         elif condition_type == 'total_topup' and total_topup_cents >= condition_value:
             earned = True
         elif condition_type == 'all_achievements':
-            # Проверяем, что все остальные достижения (кроме этого) получены
             all_other = [a for a in achievements.data if a['id'] != ach['id'] and a['condition_type'] != 'all_achievements']
             all_earned = all(
                 supabase.table('user_achievements').select('id').eq('user_id', user_id).eq('achievement_id', o['id']).execute().data
@@ -94,7 +92,7 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# ----- FastAPI -----
+# === FastAPI ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -189,7 +187,12 @@ async def admin_add_shares(request: Request):
     if not target_id or shares is None:
         return {"ok": False, "error": "Missing target_id or shares"}, 400
     shares_cents = shares * 100
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', shares_cents)}).eq('id', target_id).execute()
+    # Безопасное обновление: получаем текущее значение и добавляем
+    user = supabase.table('users').select('shares').eq('id', target_id).execute()
+    if not user.data:
+        return {"ok": False, "error": "User not found"}, 404
+    new_shares = user.data[0]['shares'] + shares_cents
+    supabase.table('users').update({'shares': new_shares}).eq('id', target_id).execute()
     return {"ok": True}
 
 @app.post("/admin/add-stars")
@@ -202,7 +205,11 @@ async def admin_add_stars(request: Request):
         return {"ok": False, "error": "Access denied"}, 403
     if not target_id or stars is None:
         return {"ok": False, "error": "Missing target_id or stars"}, 400
-    supabase.table('users').update({'stars_balance': supabase.raw('stars_balance + ?', stars)}).eq('id', target_id).execute()
+    user = supabase.table('users').select('stars_balance').eq('id', target_id).execute()
+    if not user.data:
+        return {"ok": False, "error": "User not found"}, 404
+    new_balance = user.data[0]['stars_balance'] + stars
+    supabase.table('users').update({'stars_balance': new_balance}).eq('id', target_id).execute()
     return {"ok": True}
 
 @app.post("/admin/cancel-order")
@@ -218,11 +225,15 @@ async def admin_cancel_order(request: Request):
     order = order.data[0]
     if order['status'] != 'active':
         return {"ok": False, "error": "Order already completed or cancelled"}, 400
-    supabase.table('users').update({'shares': supabase.raw('shares + ?', order['amount'])}).eq('id', order['seller_id']).execute()
+    # Возвращаем акции продавцу
+    user = supabase.table('users').select('shares').eq('id', order['seller_id']).execute()
+    if user.data:
+        new_shares = user.data[0]['shares'] + order['amount']
+        supabase.table('users').update({'shares': new_shares}).eq('id', order['seller_id']).execute()
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
-# ----- Telegram handlers -----
+# === Telegram handlers ===
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -244,18 +255,32 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment(message: types.Message):
     amount_stars = message.successful_payment.total_amount
     user_id = message.from_user.id
-    supabase.table('users').update({
-        'stars_balance': supabase.raw('stars_balance + ?', amount_stars),
-        'total_topup': supabase.raw('total_topup + ?', amount_stars * 100)
-    }).eq('id', user_id).execute()
+    # Обновляем баланс и total_topup
+    user = supabase.table('users').select('stars_balance, total_topup').eq('id', user_id).execute()
+    if user.data:
+        new_balance = user.data[0]['stars_balance'] + amount_stars
+        new_topup = (user.data[0]['total_topup'] or 0) + amount_stars * 100
+        supabase.table('users').update({
+            'stars_balance': new_balance,
+            'total_topup': new_topup
+        }).eq('id', user_id).execute()
+    else:
+        supabase.table('users').update({
+            'stars_balance': amount_stars,
+            'total_topup': amount_stars * 100
+        }).eq('id', user_id).execute()
     await save_notification(user_id, f"✅ Баланс пополнен на {amount_stars} ⭐", "notify_topup")
     user_data = supabase.table('users').select('referred_by, referral_bonus_claimed').eq('id', user_id).execute()
     if user_data.data:
         referred_by = user_data.data[0].get('referred_by')
         bonus_claimed = user_data.data[0].get('referral_bonus_claimed', False)
         if referred_by and not bonus_claimed and amount_stars >= 10:
-            supabase.table('users').update({'shares': supabase.raw('shares + 500')}).eq('id', referred_by).execute()
-            supabase.table('users').update({'referral_count': supabase.raw('referral_count + 1')}).eq('id', referred_by).execute()
+            # Начисляем 5 акций рефереру (500 центов)
+            referrer = supabase.table('users').select('shares').eq('id', referred_by).execute()
+            if referrer.data:
+                new_shares = referrer.data[0]['shares'] + 500
+                supabase.table('users').update({'shares': new_shares}).eq('id', referred_by).execute()
+                supabase.table('users').update({'referral_count': supabase.raw('referral_count + 1')}).eq('id', referred_by).execute()
             supabase.table('users').update({'referral_bonus_claimed': True}).eq('id', user_id).execute()
             await save_notification(referred_by, f"🎉 Ваш друг @{message.from_user.username or user_id} пополнил баланс на {amount_stars} ⭐! Вы получили 5 акций.", "notify_referral")
             await check_achievements(referred_by)
