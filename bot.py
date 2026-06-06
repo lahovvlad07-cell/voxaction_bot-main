@@ -1,5 +1,4 @@
 import os
-import re
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -11,7 +10,6 @@ from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
 
-# === Конфигурация ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -27,7 +25,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === Уведомления ===
 async def save_notification(user_id: int, message: str, notify_type: str = 'info'):
     try:
         supabase.table('notifications').insert({
@@ -45,7 +42,6 @@ async def save_notification(user_id: int, message: str, notify_type: str = 'info
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление {user_id}: {e}")
 
-# === Проверка достижений ===
 async def check_achievements(user_id: int):
     achievements = supabase.table('achievements').select('*').execute()
     if not achievements.data:
@@ -87,7 +83,6 @@ async def check_achievements(user_id: int):
             supabase.table('user_achievements').insert({'user_id': user_id, 'achievement_id': ach['id']}).execute()
             await save_notification(user_id, f"🏆 Новое достижение: {ach['name']}! {ach['description']}", "notify_trades")
 
-# === FastAPI ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -135,23 +130,6 @@ async def create_invoice(request: Request):
     except Exception as e:
         logging.error(f"Invoice error: {e}")
         return {"ok": False, "error": str(e)}, 500
-
-@app.post("/update-ref-code")
-async def update_referral_code(request: Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    custom_code = data.get('custom_code', '').strip().lower()
-    if not user_id:
-        return {"ok": False, "error": "Missing user_id"}, 400
-    if not custom_code or len(custom_code) > 32:
-        return {"ok": False, "error": "Код должен быть от 1 до 32 символов"}, 400
-    if not re.match(r'^[a-z0-9_]+$', custom_code):
-        return {"ok": False, "error": "Используйте только латиницу, цифры и символ подчёркивания (_)"}, 400
-    existing = supabase.table('users').select('id').eq('custom_ref_code', custom_code).execute()
-    if existing.data:
-        return {"ok": False, "error": "Этот код уже занят, выберите другой"}, 400
-    supabase.table('users').update({'custom_ref_code': custom_code}).eq('id', user_id).execute()
-    return {"ok": True, "custom_ref_code": custom_code}
 
 @app.post("/trade-notification")
 async def trade_notification(request: Request):
@@ -243,7 +221,6 @@ async def admin_cancel_order(request: Request):
     supabase.table('orders').update({'status': 'cancelled'}).eq('id', order_id).execute()
     return {"ok": True}
 
-# === Telegram handlers ===
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     args = message.text.split()
@@ -251,10 +228,7 @@ async def start_cmd(message: types.Message):
     user_id = message.from_user.id
 
     if ref_code:
-        # Проверяем сначала кастомный код, потом стандартный
-        referrer = supabase.table('users').select('id').eq('custom_ref_code', ref_code).execute()
-        if not referrer.data:
-            referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
+        referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
         if referrer.data and referrer.data[0]['id'] != user_id:
             referrer_id = referrer.data[0]['id']
             current_user = supabase.table('users').select('referred_by').eq('id', user_id).execute()
