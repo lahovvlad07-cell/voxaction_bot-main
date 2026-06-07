@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command   # <--- ИСПРАВЛЕНО
+from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
@@ -281,6 +281,43 @@ async def process_withdraw(callback: types.CallbackQuery):
         f"Ваш баланс: {new_balance} ⭐"
     )
     await callback.answer()
+
+# ===== НОВЫЙ ЭНДПОИНТ ДЛЯ НАЧИСЛЕНИЯ БОНУСОВ ЗА ПРИГЛАШЕНИЯ =====
+@app.post("/claim-referral-bonus")
+async def claim_referral_bonus(request: Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    friends_needed = data.get('friends_needed')
+    stars = data.get('stars')
+
+    if not user_id or not friends_needed or not stars:
+        return {"ok": False, "error": "Missing data"}
+
+    # Проверяем, есть ли уже такой бонус у пользователя
+    existing = supabase.table('referral_bonuses').select('id').eq('user_id', user_id).eq('friends_required', friends_needed).execute()
+    if existing.data:
+        return {"ok": False, "error": "Бонус уже получен"}
+
+    # Проверяем, что пользователь действительно набрал нужное количество друзей
+    user = supabase.table('users').select('referral_count').eq('id', user_id).execute()
+    if not user.data or user.data[0]['referral_count'] < friends_needed:
+        return {"ok": False, "error": "Не выполнено условие"}
+
+    # Начисляем звёзды (в центах)
+    stars_cents = stars * 100
+    supabase.table('users').update({'stars_balance': supabase.raw(f'stars_balance + {stars_cents}')}).eq('id', user_id).execute()
+    # Записываем, что бонус получен
+    supabase.table('referral_bonuses').insert({
+        'user_id': user_id,
+        'friends_required': friends_needed,
+        'stars_received': stars,
+        'claimed_at': 'now()'
+    }).execute()
+
+    # Уведомление
+    await save_notification(user_id, f"🎉 Вы получили {stars} ⭐ за приглашение {friends_needed} друга(ей)!", "notify_referral")
+
+    return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn
