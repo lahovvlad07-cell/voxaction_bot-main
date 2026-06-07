@@ -174,10 +174,10 @@ async def start_cmd(message: types.Message):
     ref_code = args[1] if len(args) > 1 else None
     user_id = message.from_user.id
 
+    # Обработка реферального кода – только custom_ref_code, стандартный referral_code не используется
     if ref_code:
-        referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
-        if not referrer.data:
-            referrer = supabase.table('users').select('id').eq('custom_ref_code', ref_code).execute()
+        # Ищем пользователя по custom_ref_code
+        referrer = supabase.table('users').select('id').eq('custom_ref_code', ref_code).execute()
         if referrer.data and referrer.data[0]['id'] != user_id:
             referrer_id = referrer.data[0]['id']
             current_user = supabase.table('users').select('referred_by').eq('id', user_id).execute()
@@ -282,7 +282,7 @@ async def process_withdraw(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-# ===== НОВЫЙ ЭНДПОИНТ ДЛЯ НАЧИСЛЕНИЯ БОНУСОВ ЗА ПРИГЛАШЕНИЯ =====
+# ===== ЭНДПОИНТ ДЛЯ НАЧИСЛЕНИЯ БОНУСОВ ЗА ПРИГЛАШЕНИЯ (звёзды) =====
 @app.post("/claim-referral-bonus")
 async def claim_referral_bonus(request: Request):
     data = await request.json()
