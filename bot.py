@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 from supabase import create_client
 
@@ -145,11 +145,9 @@ async def update_referral_code(request: Request):
         return {"ok": False, "error": "Код должен быть от 1 до 32 символов"}, 400
     if not re.match(r'^[a-z0-9_]+$', custom_code):
         return {"ok": False, "error": "Используйте только латиницу, цифры и символ подчёркивания (_)"}, 400
-    # Проверяем уникальность
     existing = supabase.table('users').select('id').eq('custom_ref_code', custom_code).execute()
     if existing.data:
         return {"ok": False, "error": "Этот код уже занят, выберите другой"}, 400
-    # Обновляем
     supabase.table('users').update({'custom_ref_code': custom_code}).eq('id', user_id).execute()
     return {"ok": True, "custom_ref_code": custom_code}
 
@@ -167,9 +165,6 @@ async def trade_notification(request: Request):
     await check_achievements(seller_id)
     return {"ok": True}
 
-# ... (остальные админ-эндпоинты без изменений) ...
-# (admin/stats, admin/users, admin/add-shares, admin/add-stars, admin/cancel-order)
-
 # === Telegram handlers ===
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
@@ -177,9 +172,7 @@ async def start_cmd(message: types.Message):
     ref_code = args[1] if len(args) > 1 else None
     user_id = message.from_user.id
 
-    # Обработка реферального кода (поддерживает и стандартный REF..., и кастомный)
     if ref_code:
-        # Ищем пользователя у которого либо referral_code == ref_code, либо custom_ref_code == ref_code
         referrer = supabase.table('users').select('id').eq('referral_code', ref_code).execute()
         if not referrer.data:
             referrer = supabase.table('users').select('id').eq('custom_ref_code', ref_code).execute()
